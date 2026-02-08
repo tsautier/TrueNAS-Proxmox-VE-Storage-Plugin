@@ -45,6 +45,7 @@ Comprehensive documentation for the TrueNAS Proxmox VE Storage Plugin.
 **Tools**:
 - [Test Suite](Tools.md#test-suite)
 - [Health Check Tool](Tools.md#health-check-tool)
+- [Diagnostics Bundle](Tools.md#diagnostics-bundle)
 - [Orphan Cleanup Tool](Tools.md#orphan-cleanup-tool)
 - [Cluster Update Script](Tools.md#cluster-update-script)
 - [Version Check Script](Tools.md#version-check-script)
@@ -78,7 +79,7 @@ wiki/
 ├── Installation.md             # Installation and setup guide
 ├── Configuration.md            # Configuration reference
 ├── Testing.md                  # Test suite usage and validation
-├── Tools.md                    # Tools and utilities (test suite, health check, orphan cleanup, cluster deployment)
+├── Tools.md                    # Tools and utilities (test suite, health check, diagnostics bundle, orphan cleanup, cluster deployment)
 ├── Troubleshooting.md          # Common issues and solutions
 ├── Advanced-Features.md        # Performance, clustering, security
 ├── API-Reference.md            # TrueNAS API technical details
@@ -151,6 +152,6 @@ For issues not covered in documentation:
 
 ## Version Information
 
-**Plugin Version**: 1.1.7
-**Documentation Last Updated**: November 22, 2025
+**Plugin Version**: 1.2.5
+**Documentation Last Updated**: December 18, 2025
 **Compatibility**: Proxmox VE 8.x+, TrueNAS SCALE 22.x+

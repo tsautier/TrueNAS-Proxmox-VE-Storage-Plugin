@@ -38,7 +38,9 @@ Common issues and solutions for the TrueNAS Proxmox VE Storage Plugin.
   - ["Volume created but device not accessible after 10 seconds"](#volume-created-but-device-not-accessible-after-10-seconds)
 - [VM Deletion Issues](#vm-deletion-issues)
   - [Orphaned Volumes After VM Deletion](#orphaned-volumes-after-vm-deletion)
+  - [Stale NVMe Namespaces](#stale-nvme-namespaces)
   - [Warnings During VM Deletion](#warnings-during-vm-deletion)
+  - [Stale SCSI Devices After Disk Deletion](#stale-scsi-devices-after-disk-deletion)
 - [Snapshot Issues](#snapshot-issues)
   - [Snapshot Creation Fails](#snapshot-creation-fails)
   - [Snapshot Rollback Fails](#snapshot-rollback-fails)
@@ -1093,6 +1095,13 @@ ERROR: Could not locate NVMe device for UUID after 5 seconds
 Expected device: /dev/disk/by-id/nvme-uuid.550e8400-e29b-41d4-a716-446655440000
 ```
 
+**Background**: The plugin uses a three-tier device matching strategy:
+1. **NGUID matching** (primary) - Matches NVMe Namespace GUID from TrueNAS API against sysfs
+2. **NSID matching** (fallback) - Matches Namespace ID from sysfs if NGUID unavailable
+3. **Single device** (safe fallback) - Returns device when only one namespace exists
+
+This error indicates all three matching strategies failed to locate the device.
+
 **Diagnosis**:
 ```bash
 # Check if subsystem is connected
@@ -1103,6 +1112,12 @@ nvme list
 
 # Check for UUID symlinks
 ls -la /dev/disk/by-id/nvme-uuid.*
+
+# Check NGUID in sysfs (for debugging)
+cat /sys/block/nvme*/nguid
+
+# Check NSID in sysfs
+cat /sys/block/nvme*/nsid
 ```
 
 **Solutions**:
@@ -1154,6 +1169,24 @@ dmesg | grep -i nvme | tail -50
 
 # Look for device discovery messages
 dmesg | grep -i "nvme.*namespace"
+```
+
+#### 5. Verify NGUID/NSID Matching (Debug)
+```bash
+# Enable debug logging to see matching details
+# In /etc/pve/storage.cfg:
+debug 2
+
+# Then check logs for device matching
+journalctl -f | grep '\[TrueNAS\].*nvme_find_device'
+
+# You should see:
+# - "attempting NGUID match for <guid>"
+# - "matched device /dev/nvmeXnY by NGUID" (success)
+# OR
+# - "NGUID matching failed - no device matched" (fallback to NSID)
+# - "attempting NSID match for NSID X"
+# - "matched device /dev/nvmeXnY by NSID" (success)
 ```
 
 ### Namespace Creation Fails
@@ -1412,7 +1445,28 @@ multipath -r
 
 **Solutions**:
 
-#### 1. Manual Cleanup
+#### 1. Use Installer Cleanup Tool (Recommended)
+
+The installer includes an integrated orphan cleanup utility that supports both iSCSI and NVMe/TCP:
+
+```bash
+./install.sh
+# Choose: Diagnostics
+# Choose: Cleanup orphaned resources
+# Select the affected storage
+# Review detected orphans
+# Type 'DELETE' to confirm cleanup
+```
+
+This tool automatically:
+- Detects transport mode (iSCSI or NVMe/TCP)
+- Identifies orphaned resources (zvols, extents/namespaces, mappings)
+- Deletes them in the correct dependency order
+- Reports success/failure for each resource
+
+See [Advanced Features - Orphan Resource Cleanup](Advanced-Features.md#orphan-resource-cleanup) for detailed documentation.
+
+#### 2. Manual Cleanup via pvesm
 ```bash
 # List remaining volumes for deleted VM
 pvesm list truenas-storage | grep vm-100
@@ -1422,7 +1476,7 @@ pvesm free truenas-storage:vm-100-disk-0-lun1
 pvesm free truenas-storage:vm-100-disk-1-lun2
 ```
 
-#### 2. Direct ZFS Cleanup (if plugin fails)
+#### 3. Direct ZFS Cleanup (if plugin fails)
 ```bash
 # On TrueNAS, list zvols
 zfs list -t volume | grep vm-100
@@ -1431,16 +1485,34 @@ zfs list -t volume | grep vm-100
 zfs destroy tank/proxmox/vm-100-disk-0
 zfs destroy tank/proxmox/vm-100-disk-1
 
-# Clean up iSCSI extents via web UI:
-# Shares > Block Shares (iSCSI) > Extents
-# Delete extents for vm-100
+# Clean up transport mappings via TrueNAS web UI:
+# For iSCSI: Shares > Block Shares (iSCSI) > Extents
+# For NVMe: Shares > Block Shares (NVMe-oF) > Namespaces
+# Delete entries for vm-100
 ```
 
-#### 3. Prevention: Use GUI for Deletion
+#### 4. Prevention: Use GUI for Deletion
 ```bash
 # Recommended: Always delete VMs via Proxmox web UI
 # This ensures proper cleanup of all resources
 ```
+
+### Stale NVMe Namespaces
+
+**Symptom**: NVMe namespaces exist on TrueNAS but the corresponding zvol is missing
+
+**Cause**: Partial deletion where zvol was removed but namespace deletion failed
+
+**Diagnosis**:
+```bash
+# Check for stale namespaces via installer
+./install.sh
+# Choose: Diagnostics
+# Choose: Cleanup orphaned resources
+# Select NVMe/TCP storage
+```
+
+**Solution**: Use the installer cleanup tool as described above. The tool will detect namespaces with invalid `device_path` entries and offer to delete them.
 
 ### Warnings During VM Deletion
 
@@ -1460,6 +1532,38 @@ warning: delete extent id=115 failed: does not exist
 - Only actual failures (permissions, locks, etc.) generate warnings
 
 **Action**: No action needed if deletion completes successfully
+
+### Stale SCSI Devices After Disk Deletion
+
+**Symptom**: Kernel errors "Read Capacity failed" after deleting iSCSI disks
+
+**Example kernel logs**:
+```
+sd 1:0:0:11: [sdx] Read Capacity(16) failed: Result: hostbyte=DID_OK driverbyte=DRIVER_OK
+sd 0:0:0:11: [sdw] Read Capacity(10) failed: Result: hostbyte=DID_OK driverbyte=DRIVER_OK
+```
+
+**Status**: Automatically handled by plugin (v1.1.9+)
+
+**Explanation**:
+- When disks are deleted, the Linux SCSI layer may retain "ghost" device entries with size=0
+- These stale devices cause kernel errors on every iSCSI session rescan
+- Plugin v1.1.9+ automatically cleans up SCSI devices after successful disk deletion
+
+**Manual cleanup (for older plugin versions)**:
+```bash
+# Remove stale SCSI devices with size=0
+for dev in /sys/block/sd*; do
+    devname=$(basename "$dev")
+    size=$(cat "$dev/size" 2>/dev/null)
+    if [ "$size" = "0" ] && [ -e "$dev/device/delete" ]; then
+        echo "Removing stale device $devname (size=0)"
+        echo 1 > "$dev/device/delete"
+    fi
+done
+```
+
+**Note**: The automatic cleanup is transparent and requires no configuration. Debug logging at level 2 shows cleanup operations.
 
 ## Snapshot Issues
 
@@ -1700,6 +1804,24 @@ pvesm status
 ping YOUR_TRUENAS_IP
 ```
 
+#### 4. Check Block Device Discovery (if migration still fails)
+```bash
+# On destination node, verify devices appear after volume activation
+# For iSCSI:
+ls -la /dev/disk/by-path/ | grep iscsi
+
+# For NVMe-oF-TCP:
+nvme list
+ls -la /dev/disk/by-id/nvme-uuid.*
+
+# Enable debug logging to see device wait process
+# In /etc/pve/storage.cfg:
+debug 2
+
+# Then check logs during migration
+journalctl -f | grep '\[TrueNAS\].*activate_volume'
+```
+
 ## Log Files and Debugging
 
 ### Proxmox Logs
@@ -1753,7 +1875,7 @@ lsblk
 
 ### Enable Debug Logging
 
-The plugin has built-in debug logging with configurable verbosity levels:
+The plugin has built-in debug logging with configurable verbosity levels. All log messages are prefixed with `[TrueNAS]` for easy filtering.
 
 ```ini
 # In /etc/pve/storage.cfg, add debug level to your storage entry:
@@ -1766,28 +1888,65 @@ truenasplugin: truenas-storage
 ```
 
 **Debug Levels**:
-- `0` (default): Errors only - always logged regardless of setting
-- `1`: Light debug - logs function entry points and major operations
-- `2`: Verbose debug - logs all API calls with full parameters and responses
+| Level | Description | Typical Log Count* |
+|-------|-------------|-------------------|
+| `0` (default) | Errors only - always logged regardless of setting | 0 (unless errors occur) |
+| `1` | Light debug - function entry points and major operations | ~25-30 per operation |
+| `2` | Verbose debug - all API calls with full JSON parameters/responses | ~65-75 per operation |
+
+*Log counts based on a typical alloc/free cycle. Actual counts vary by operation complexity.
+
+**Log Message Format**:
+All plugin log messages include the `[TrueNAS]` prefix:
+```
+Nov 22 17:01:07 pve-node pvesm[12345]: [TrueNAS] alloc_image: vmid=100, name=vm-100-disk-0, size=10485760 KiB
+Nov 22 17:01:08 pve-node pvesm[12345]: [TrueNAS] Pre-flight: checking target visibility for iqn.2005-10.org.freenas.ctl:proxmox
+Nov 22 17:01:09 pve-node pvesm[12345]: [TrueNAS] _api_call: method=pool.dataset.create, transport=ws
+```
+
+**Syslog Identifier**:
+The syslog identifier inherits from the calling process, not from the plugin:
+- `pvesm` - When running pvesm commands manually
+- `pvesh` - When using pvesh API commands
+- `pvestatd` - When pvestatd performs background storage checks
+- `pvedaemon` - When the Proxmox daemon invokes storage operations
+
+The `[TrueNAS]` prefix ensures all plugin messages are easily searchable regardless of the calling process.
 
 **Viewing Logs**:
 ```bash
-# Logs appear in daemon syslog facility
-# The process identifier varies by calling context:
-#   - pvesm commands → identifier 'pvesm'
-#   - pvestatd background checks → identifier 'pvestatd'
+# Best method: Search for [TrueNAS] prefix (works regardless of calling process)
+journalctl --since '10 minutes ago' | grep '\[TrueNAS\]'
 
-# Search all recent logs for plugin output
-journalctl SYSLOG_FACILITY=3 --since '10 minutes ago' | grep -E '(alloc_image|Pre-flight|_api_call|free_image)'
+# Real-time monitoring
+journalctl -f | grep '\[TrueNAS\]'
 
-# Follow pvesm command logs in real-time
-journalctl -f | grep -E '(pvesm|pvestatd).*alloc|Pre-flight|_api_call'
+# Count log messages (useful for verifying debug level)
+journalctl --since '5 minutes ago' | grep -c '\[TrueNAS\]'
 
-# Or filter syslog directly
-grep -E '(alloc_image|Pre-flight|_api_call)' /var/log/syslog | tail -100
+# View logs from specific process (e.g., pvesm commands only)
+journalctl -t pvesm --since '10 minutes ago' | grep '\[TrueNAS\]'
+
+# Filter by log level (Level 2 shows _api_call entries)
+journalctl --since '10 minutes ago' | grep '\[TrueNAS\].*_api_call'
+
+# View pre-flight check logs
+journalctl --since '10 minutes ago' | grep '\[TrueNAS\].*Pre-flight'
 ```
 
-**Note**: After changing the debug level, restart Proxmox services:
+**Level 1 Message Types** (Light Debug):
+- `alloc_image` - Volume allocation entry/exit
+- `free_image` - Volume deletion entry/exit
+- `Pre-flight` - Pre-flight validation checks (~90% of level 1 messages)
+- `_free_image_iscsi` / `_free_image_nvme` - Transport-specific deletion
+
+**Level 2 Adds** (Verbose Debug):
+- `_api_call` - Full API request/response with JSON payloads
+- Internal state decisions and computed values
+- Detailed error context for troubleshooting API issues
+- SCSI device cleanup operations (captured devices, cleanup results)
+
+**Note**: After changing the debug level, the new setting takes effect immediately for new operations (no service restart required). However, if you want to clear cached storage status, restart Proxmox services:
 ```bash
 systemctl restart pvedaemon pveproxy
 ```

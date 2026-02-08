@@ -29,6 +29,7 @@ Advanced configuration, performance tuning, clustering, and security features of
 - [Pre-flight Validation](#pre-flight-validation)
 - [Automatic Target Visibility](#automatic-target-visibility)
 - [Storage Status and Health Monitoring](#storage-status-and-health-monitoring)
+- [Orphan Resource Cleanup](#orphan-resource-cleanup)
 - [Advanced Troubleshooting](#advanced-troubleshooting)
   - [Force Delete on In-Use](#force-delete-on-inuse)
   - [Logout on Free](#logout-on-free)
@@ -859,6 +860,108 @@ api_retry_delay 1
 
 Jitter: Random 0-20% added to prevent thundering herd
 
+### Concurrent Operations and Storage Lock Timeout
+
+The plugin is optimized to handle parallel disk allocations and bulk storage operations through a combination of ephemeral WebSocket connections and extended lock timeouts.
+
+#### Ephemeral WebSocket Connections for Write Operations
+
+All write operations (create, update, delete) use one-time WebSocket connections that are created, used, and immediately closed. This prevents response interleaving issues when multiple concurrent processes perform operations simultaneously.
+
+**How it Works**:
+1. For each write operation, a new WebSocket connection is created via `_ws_open_ephemeral()`
+2. The operation is executed on this isolated connection
+3. Connection is immediately closed via `_ws_close_ephemeral()` with RFC 6455 compliant close frame
+4. Read operations continue using cached persistent connections for efficiency
+
+**Affected Write Operations**:
+- Dataset operations (create, delete, update, clone)
+- iSCSI extent and target-extent creation/deletion
+- Snapshot operations (create, delete, rollback)
+- NVMe namespace operations
+- Bulk operations via core.bulk API
+
+**Fork Safety for Persistent Connections**:
+
+Read operations use persistent (cached) connections for efficiency. These are protected against fork-related crashes through the NullDestructor pattern:
+
+- Child processes (e.g., pvestatd workers) detect inherited connections via PID mismatch
+- Inherited sockets are reblessed into a `NullDestructor` class with empty `DESTROY` method
+- This prevents double-free memory corruption when child processes exit
+- Parent process connections remain valid and functional
+
+See [Changelog v1.2.6](../wiki/Changelog.md#version-126-december-20-2025) for technical details.
+
+#### Storage Lock Timeout Configuration
+
+The Proxmox Cluster File System (CFS) requires a lock on the storage configuration file during write operations. The default 10-second timeout is insufficient for parallel bulk provisioning.
+
+```ini
+# Extended timeout for parallel operations (default: 120 seconds)
+storage_lock_timeout 120
+
+# For high-concurrency scenarios (8+ parallel operations)
+storage_lock_timeout 180
+
+# For very high concurrency (enterprise bulk provisioning)
+storage_lock_timeout 300
+```
+
+**Timeout Calculation**:
+- Each disk allocation takes approximately 10-15 seconds (zvol creation, extent creation, mapping)
+- With n concurrent operations, timeout should be at least 15 * n seconds
+- 120 seconds default supports 8+ concurrent operations comfortably
+- Range: 10-600 seconds
+
+**When to Increase**:
+- Parallel VM creation with many VMs
+- Bulk provisioning of multiple storage volumes
+- Lower-performance TrueNAS backends
+- High-latency network between Proxmox and TrueNAS
+
+**Example Scenarios**:
+
+| Scenario | Concurrent Ops | Recommended Timeout | Rationale |
+|----------|---|---|---|
+| Single VM creation | 1 | 120s (default) | Sufficient for single operations |
+| 5 VMs in parallel | 5 | 120s (default) | ~13s per op, 120s handles comfortably |
+| 10 VMs in parallel | 10 | 180s | ~13s per op, 180s handles with margin |
+| Bulk 20 VM deployment | 20 | 300s | ~15s per op, 300s maximum buffer |
+
+**Technical Details**:
+- Lock is acquired via `PVE::Storage::lock_storage()` which serializes access to `/etc/pve/storage.cfg`
+- When timeout is exceeded, the operation fails with "lock timeout" error
+- Lock timeout is separate from API retry timeout
+- Both ephemeral connections AND extended lock timeout are required for reliable concurrent operations
+
+#### Monitoring Concurrent Operations
+
+Check for lock timeout issues:
+
+```bash
+# Monitor for lock timeouts in recent operations
+journalctl --since '30 minutes ago' | grep 'lock timeout'
+
+# View detailed operation logs with debug enabled
+debug 1  # In storage configuration
+journalctl -u pvedaemon -f | grep TrueNAS
+```
+
+**Error Indicators**:
+- Intermittent failures during parallel operations
+- "lock timeout" in error messages
+- Failures that don't occur with sequential operations
+- Increasing failure rate as concurrency increases
+
+**Resolution**:
+```ini
+# Increase storage_lock_timeout in /etc/pve/storage.cfg
+storage_lock_timeout 240
+
+# Restart services to apply
+systemctl restart pvedaemon pveproxy
+```
+
 ## Cluster Configuration
 
 ### Shared Storage Setup
@@ -879,7 +982,7 @@ truenasplugin: cluster-storage
 ```
 
 **Critical Settings**:
-- `shared 1` - Required for cluster
+- `shared 1` - Required for cluster and VM migration
 - Multiple portals - For redundancy
 - `use_multipath 1` - For failover
 
@@ -1350,6 +1453,102 @@ When storage becomes inactive:
 - New volume operations fail with clear errors
 - Storage auto-recovers when issue resolved
 - No manual intervention needed for transient issues
+
+## Orphan Resource Cleanup
+
+The installer provides an integrated orphan detection and cleanup utility for both iSCSI and NVMe/TCP storage. This helps identify and remove storage resources that are no longer associated with active Proxmox volumes.
+
+### What Are Orphaned Resources?
+
+Orphaned resources occur when:
+- A VM is deleted but storage cleanup fails (e.g., network issue during deletion)
+- Manual intervention on TrueNAS removes part of a volume's configuration
+- A zvol exists without its corresponding transport mapping (extent/namespace)
+- A transport mapping exists but points to a non-existent zvol
+
+### Orphan Types by Transport
+
+**iSCSI Storage:**
+- **[EXTENT]** - iSCSI extent pointing to a missing zvol
+- **[TARGET-EXTENT]** - Target-extent mapping referencing a missing extent
+- **[ZVOL]** - Zvol with no iSCSI extent pointing to it
+
+**NVMe/TCP Storage:**
+- **[NAMESPACE]** - NVMe namespace with `device_path` pointing to a missing zvol
+- **[ZVOL]** - Zvol with no NVMe namespace referencing it
+- **[SUBSYSTEM]** - Empty NVMe subsystem (no namespaces) not configured in storage.cfg
+
+### Running Orphan Cleanup
+
+Access the cleanup utility through the installer diagnostics menu:
+
+```bash
+./install.sh
+# Choose: Diagnostics
+# Choose: Cleanup orphaned resources
+```
+
+**Interactive Flow:**
+1. Select the storage to scan
+2. Installer detects transport mode (iSCSI or NVMe/TCP) automatically
+3. Queries TrueNAS for all relevant resources
+4. Correlates zvols with their transport mappings
+5. Displays list of identified orphans
+6. Requires typed confirmation (`DELETE`) before proceeding
+7. Deletes orphaned resources in the correct order
+
+### Cleanup Order
+
+**iSCSI**: Target-extents (first) -> Extents -> Zvols (last)
+
+**NVMe/TCP**: Namespaces (first) -> Zvols -> Subsystems (last)
+
+This order ensures dependent resources are removed before their parents.
+
+### Safety Features
+
+- **Dry Run by Default**: Detection phase shows what would be deleted without making changes
+- **Typed Confirmation**: Requires typing `DELETE` exactly to proceed
+- **Dataset Scoping**: Only scans zvols under the configured dataset (e.g., `tank/proxmox`)
+- **Plugin Pattern Matching**: Only considers zvols matching the plugin naming pattern (`vm-XXX-disk-YYY`)
+- **Error Reporting**: Reports individual failures without aborting the entire operation
+
+### Example Output
+
+```
+Detecting orphaned resources for storage 'truenas-nvme' (transport: nvme-tcp)...
+Fetching NVMe namespaces and zvols...
+
+Found 3 orphaned resource(s):
+
+  [NAMESPACE] ID: 15 (device_path: zvol/tank/proxmox/vm-100-disk-0 - zvol missing)
+  [ZVOL] tank/proxmox/vm-101-disk-0 (no namespace pointing to this zvol)
+  [SUBSYSTEM] ID: 8, Name: old-storage (empty, not in storage.cfg)
+
+WARNING: This will permanently delete these orphaned resources!
+
+Type 'DELETE' (all caps) to confirm deletion: DELETE
+
+Cleaning up orphaned resources...
+
+Deleting NVMe namespace ID: 15...
+  Deleted namespace 15
+Deleting zvol: tank/proxmox/vm-101-disk-0...
+  Deleted zvol tank/proxmox/vm-101-disk-0
+
+Cleanup complete!
+```
+
+### When to Run Cleanup
+
+- After recovering from network outages during VM deletions
+- When storage shows inconsistent state
+- Before migrating to a new storage configuration
+- As part of periodic maintenance
+
+### See Also
+
+- [Troubleshooting - Orphaned Volumes After VM Deletion](Troubleshooting.md#orphaned-volumes-after-vm-deletion)
 
 ## Advanced Troubleshooting
 

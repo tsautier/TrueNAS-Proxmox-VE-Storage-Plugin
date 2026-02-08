@@ -1,5 +1,489 @@
 # TrueNAS Plugin Changelog
 
+## Version 1.2.6 (December 20, 2025)
+
+### 🐛 **Bug Fix: Improved Fork-Safety with NullDestructor Pattern**
+
+#### **Fixed remaining edge cases in fork handling that could still cause segfaults**
+- **Problem**: v1.2.5 InactiveDestroy pattern still caused crashes in some environments because setting `$conn->{sock} = undef` and clearing `%_ws_connections` triggers Perl's DESTROY chain, where underlying IO::Socket layers could still attempt cleanup on already-closed file descriptors
+- **Root cause**: Even with `_SSL_object` removed, setting socket references to undef invokes the full DESTROY chain including IO::Socket::INET's destructor and Perl's internal IO layer cleanup
+- **Solution**: Implemented **NullDestructor rebless pattern** - inherited sockets are reblessed into a dummy class with an empty DESTROY method, completely preventing any cleanup code from running
+
+### 🔧 **Technical Details**
+Fork detection now uses a more robust approach:
+1. **Added `NullDestructor` package** with empty `DESTROY { }` method
+2. **Rebless inherited sockets** into NullDestructor class - makes ALL destruction code no-op
+3. **Clear connection hash AFTER reblessing** - safe because DESTROY is now a no-op
+4. Child creates fresh connections on next call; neutered sockets remain until exit (harmless)
+
+### 📊 **Impact**
+- **Eliminates edge-case segfaults**: No cleanup code runs at all on inherited sockets
+- **Simpler implementation**: No need to manipulate internal IO::Socket::SSL state
+- **Memory handling**: Neutered sockets remain in child's memory until exit (OS reclaims)
+- **Based on analysis**: Gemini-assisted investigation identified the reference-clearing as root cause
+
+---
+
+## Version 1.2.5 (December 18, 2025)
+
+### 🐛 **Bug Fix: Complete Resolution of Fork-Related pvestatd Crashes**
+
+#### **Fixed remaining crashes using InactiveDestroy pattern**
+- **Problem**: v1.2.4 orphan list approach still caused crashes because when child process **exits**, Perl's global destruction calls DESTROY on all objects including `@_ws_orphaned`, which calls `SSL_free()` and corrupts the parent's SSL state
+- **Root cause**: Keeping socket references alive isn't enough - IO::Socket::SSL's DESTROY still runs when child exits, calling `Net::SSLeay::free()` which corrupts shared SSL context
+- **Solution**: Implemented **InactiveDestroy pattern** (similar to DBI's fork handling) that completely disables DESTROY on inherited sockets
+
+### 🔧 **Technical Details**
+Fork detection now "lobotomizes" inherited sockets so DESTROY does nothing:
+1. **Delete `_SSL_object`** from socket glob - makes IO::Socket::SSL's DESTROY a no-op
+2. **Remove from `$IO::Socket::SSL::SSL_OBJECT`** hash - clears global tracking
+3. **Close raw FD with `POSIX::close()`** - closes file descriptor without SSL protocol actions
+4. **Clear all references** - allows Perl GC to clean up safely
+
+### 📚 **Research Basis**
+- IO::Socket::SSL documentation recommends `SSL_no_shutdown` for forking servers
+- DBI uses `InactiveDestroy` attribute to prevent child cleanup affecting parent
+- DBIx::Connector uses PID-based detection with automatic reconnection
+- Pattern validated against industry-standard fork handling in Redis, PostgreSQL, and other connection pools
+
+### 📊 **Impact**
+- **Eliminates all fork-related crashes**: No more "Attempt to free unreferenced scalar" or SIGSEGV
+- **Preserves performance**: Persistent connections still used for read operations (~30ms vs ~500ms ephemeral)
+- **Production ready**: Based on proven patterns from DBI, DBIx::Connector, and IO::Socket::SSL documentation
+
+---
+
+## Version 1.2.4 (December 16, 2025)
+
+### 🐛 **Bug Fix: Complete Fix for Fork-Related pvestatd Crashes**
+
+#### **Fixed remaining "Attempt to free unreferenced scalar" crashes**
+- **Problem**: v1.2.3 fix still caused crashes because `%_ws_connections = ()` triggered Perl's DESTROY on inherited IO::Socket::SSL objects
+- **Root cause**: When clearing the connection hash, Perl decrements reference counts and calls DESTROY, which invokes `SSL_free()` on memory allocated in the parent process's address space - causing memory corruption
+- **Solution**: Added orphan list (`@_ws_orphaned`) to keep inherited connection references alive, preventing DESTROY from ever being called on inherited sockets
+
+### 🔧 **Technical Details**
+- Added `@_ws_orphaned` array to hold inherited connections
+- Fork detection now pushes connections to orphan list BEFORE clearing hash
+- This keeps refcount > 0, preventing DESTROY from being called
+- Orphaned connections stay in memory until child process exits (OS reclaims everything)
+
+---
+
+## Version 1.2.3 (December 12, 2025)
+
+### 🐛 **Bug Fix: Fork-Related pvestatd Crashes**
+
+#### **Fixed "Attempt to free unreferenced scalar" crashes caused by forked processes**
+- **Problem**: pvestatd crashed with "Attempt to free unreferenced scalar" errors followed by SIGSEGV after variable periods of operation
+- **Root cause**: When pvestatd forks child processes for monitoring tasks, both parent and child inherit references to the same WebSocket socket objects in `%_ws_connections`. Perl's reference counting treats these as independent references, causing double-free corruption when either process's garbage collector runs
+- **Solution**: Added PID tracking (`$_ws_creator_pid`) to detect when a forked child process inherits parent connections. Child processes now silently discard inherited connection references (without closing sockets - parent owns them) and create fresh connections
+
+### 🔧 **Technical Details**
+- Added `$_ws_creator_pid` variable initialized to `$$` at module load
+- `_ws_get_persistent()`: Added fork detection at function entry - if `$$ != $_ws_creator_pid`, clears `%_ws_connections` without closing sockets and updates creator PID
+- Debug logging (level 2) when fork detection invalidates inherited connections
+
+---
+
+## Version 1.2.2 (December 9, 2025)
+
+### 🐛 **Bug Fixes: Concurrent Operations & Multipath iSCSI**
+
+#### **Fixed race condition for rapid disk deletes and creation**
+- **Problem**: Rapid sequential disk operations (delete followed by create) could fail due to NVMe readdir operations returning tainted values
+- **Root cause**: Device path iteration after deletions encountered stale or partially cleaned entries
+- **Solution**: Enhanced device enumeration with proper taint handling and existence checks during rapid operations
+
+#### **Fixed "free unreferenced scalar" WebSocket error causing pvestatd crashes**
+- **Problem**: pvestatd crashed with "Attempt to free unreferenced scalar" followed by SIGSEGV after WebSocket connection failures
+- **Root cause**: Dead connections were removed from cache without properly closing the socket first, causing IO::Socket::SSL cleanup issues
+- **Solution**: Added explicit socket close before removing dead connections from the persistent connection cache in `_ws_get_persistent()`
+
+#### **Fixed spurious iSCSI login warnings in multipath configurations**
+- **Problem**: Disk operations generated repeated "iscsiadm: Could not log into all portals" warnings even when sessions were already active
+- **Root cause**: Plugin attempted to log into ALL portals without checking which individual portals were already connected
+- **Solution**: Added `_portal_connected()` helper function to check individual portal session status; `_iscsi_login_all()` now skips login for portals that already have active sessions
+
+### 🔧 **Technical Details**
+- `_ws_get_persistent()`: Now properly closes socket before removing dead connections from cache
+- `_portal_connected()`: New helper function checks if a specific portal has an active iSCSI session
+- `_all_portals_connected()`: Refactored to use `_portal_connected()` for efficiency
+- `_iscsi_login_all()`: Gets session list once at start, skips login for already-connected portals
+
+---
+
+## Version 1.2.1 (December 8, 2025)
+
+### 🐛 **Bug Fixes: pvestatd Stability and NVMe Taint Mode**
+
+#### **Fixed pvestatd crashes (SIGSEGV) from truncated API responses**
+- **Problem**: pvestatd crashed with SIGSEGV after 1-2 minutes when TrueNAS returned truncated JSON responses
+- **Root cause**: `decode_json()` threw uncaught exceptions on malformed JSON, causing cascading failures
+- **Solution**: Wrapped JSON decoding in `eval {}` with diagnostic logging (response length and preview) before re-throwing
+
+#### **Fixed "Insecure dependency in exec" errors on NVMe storage**
+- **Problem**: Moving disks to/from NVMe storage and creating EFI disks failed with Perl taint mode errors
+- **Root cause**: Device names from `readdir()` were validated but not untainted before use in system calls
+- **Solution**: Added capture groups to regex patterns to properly untaint `$entry` via `$1` assignment
+
+#### **Fixed "Can't use string (DEFAULT) as SCALAR ref" errors**
+- **Problem**: Status checks failed when TrueNAS returned string "DEFAULT" for inherited properties
+- **Root cause**: Code attempted regex matching on property values that could be references instead of strings
+- **Solution**: Added `!ref()` guard before regex matching in three locations (volume_snapshot_info, _list_images_iscsi, _list_images_nvme)
+
+### 🔧 **Technical Details**
+- `_ws_rpc()`: JSON decode now wrapped in eval with error logging
+- `_rest_api_call()`: Same JSON decode error handling added for REST transport
+- `_nvme_find_device_by_subsystem()`: Device name regex uses capture groups for untainting
+- Extended untainting to all NVMe readdir operations (`_nvme_rescan_controllers`, `_nvme_device_for_uuid`)
+- Property access hardening at lines 1953, 4019, 4157
+- Test script now boots EFI VMs to exercise `activate_volume()` code path
+
+---
+
+## Version 1.2.0 (December 7, 2025)
+
+### **Concurrent Operations Support**
+
+#### **Fixed parallel disk allocation failures (30% → 100% success rate)**
+- **Problem**: Parallel VM creation with disk allocation failed at ~30% success rate due to Proxmox CFS lock timeout
+- **Root cause**: Default 10-second CFS lock timeout was insufficient for concurrent disk allocations that take ~12-15 seconds each
+- **Solution implemented**:
+  - **Extended CFS lock timeout**: Added `storage_lock_timeout` property (default 120s, range 10-600s)
+  - **Ephemeral WebSocket connections**: Write operations now use isolated connections to prevent response interleaving
+  - **RFC 6455 compliance**: WebSocket close frames now properly formatted
+
+#### **New Configuration Options**
+- `storage_lock_timeout` - Configurable Proxmox CFS lock timeout for bulk provisioning scenarios
+
+#### **Technical Changes**
+- Added `_ws_open_ephemeral()` and `_ws_close_ephemeral()` for isolated write connections
+- Added `_api_call_write()` wrapper routing writes through ephemeral connections
+- Updated all write helpers: dataset, extent, targetextent, snapshot, bulk operations
+- Fixed `_delete_dataset_with_retry()` to use ephemeral connections for consistency
+
+---
+
+## Version 1.1.13 (December 2, 2025)
+
+### 🐛 **Critical Bug Fix: Dataset Deletion Race Condition (Issue #45)**
+
+#### **Fixed race condition causing "PoolDataset does not exist" errors and VM crashes**
+- **Problem**: VM deletion operations failed with `[ENOENT] PoolDataset does not exist` errors, followed by kernel `access beyond end of device` errors that crashed all VMs on the node
+- **Root cause**: Plugin attempted to delete datasets while kernel still had active device references, causing TrueNAS to report dataset as "busy" but return misleading "does not exist" error
+- **Impact**: VM deletions would fail and corrupt SCSI subsystem state, causing IO errors on all active VMs
+- **Solution implemented**:
+  - **Inverted deletion sequence**: Devices are now fully disconnected BEFORE dataset deletion
+  - **Device cleanup verification**: Added `_verify_devices_disconnected()` helper to ensure devices are gone before proceeding (TrueNASPlugin.pm:1190-1217)
+  - **Dataset deletion with retry**: Added `_delete_dataset_with_retry()` helper with exponential backoff for transient "busy" errors (TrueNASPlugin.pm:1239-1287)
+  - **Error differentiation**: Added `_parse_dataset_error()` to distinguish "not found" (idempotent) from "busy" (retryable) errors (TrueNASPlugin.pm:1219-1237)
+  - **Faster job polling**: Enhanced `_wait_for_job_completion()` with 100ms polling for first 5 seconds, then 1s (TrueNASPlugin.pm:1109-1170)
+  - **Increased timeout**: Dataset deletion timeout increased from 20s to 30s for better reliability under load
+
+#### **iSCSI Deletion Flow (Lines 3529-3593)**
+**Before (BROKEN)**:
+```
+Capture devices → Delete extent/mapping → Delete dataset (RACE!) → Cleanup devices → Rescan
+```
+
+**After (FIXED)**:
+```
+Capture devices → Delete extent/mapping → Logout & cleanup devices → Verify cleanup → Delete dataset with retry → Rescan
+```
+
+#### **NVMe Deletion Flow (Lines 3713-3747)**
+**Before (BROKEN)**:
+```
+Delete namespace → Disconnect (if needed) → Delete dataset (RACE!) → udevadm settle
+```
+
+**After (FIXED)**:
+```
+Delete namespace → Disconnect & verify → udevadm settle → Delete dataset with retry → udevadm settle
+```
+
+### 🔧 **Technical Details**
+- Modified `_free_image_iscsi()` (TrueNASPlugin.pm:3373-3637)
+  - Moved SCSI device cleanup to BEFORE dataset deletion (phase 4)
+  - Added device disconnect verification with 5-second timeout
+  - Replaced manual dataset deletion with retry helper
+  - Removed old "retry after logout" code (no longer needed)
+- Modified `_free_image_nvme()` (TrueNASPlugin.pm:3713-3750)
+  - Added explicit disconnect verification before dataset deletion
+  - Replaced manual dataset deletion with retry helper
+- New constants (TrueNASPlugin.pm:58-62):
+  - `DEVICE_CLEANUP_VERIFY_TIMEOUT_S = 5` - Device cleanup verification timeout
+  - `DATASET_DELETE_RETRY_COUNT = 3` - Max retries for dataset deletion
+  - `DATASET_DELETE_TIMEOUT_S = 30` - Increased from 20s
+
+### 📊 **Impact**
+- **Eliminates VM crashes**: No more "access beyond end of device" kernel errors during VM deletion
+- **Fixes misleading errors**: Correctly handles TrueNAS "busy" vs "not found" errors
+- **Better reliability**: Retry logic handles transient failures gracefully
+- **Multipath compatibility**: Works correctly in cluster environments with multiple active sessions
+- **Both transports**: Fix applies to both iSCSI and NVMe/TCP modes
+- **Slight latency increase**: Dataset deletion takes 2-5 seconds longer but eliminates race condition
+
+### ✅ **Validation**
+- Tested single disk deletion (iSCSI) - completed successfully without errors
+- Tested single disk deletion (NVMe) - completed successfully without errors
+- Tested sequential 3-disk deletion (iSCSI) - all deleted without kernel errors
+- Verified no "access beyond end of device" errors in kernel log
+- Verified no "io-error" states on active VMs during deletions
+- Tested on TrueNAS SCALE 25.10.0 with Proxmox VE 9.x cluster
+
+---
+
+## Version 1.1.12 (December 2, 2025)
+
+### 🔧 **NVMe/TCP Device Matching Improvements**
+
+#### **Improved NVMe namespace device discovery reliability**
+- **Implemented three-tier device matching strategy in `_nvme_find_device_by_subsystem()`**
+  - **Tier 1: NGUID matching** (primary) - Matches devices by NVMe Namespace GUID from TrueNAS API against sysfs
+  - **Tier 2: NSID matching** (fallback) - Falls back to Namespace ID matching if API fails or NGUID unavailable
+  - **Tier 3: Single device** (safe fallback) - Returns single device when only one namespace exists on subsystem
+  - **Eliminated unreliable "newest device" timestamp fallback** - Removed race-condition-prone mtime-based selection
+  - Modified `_nvme_find_device_by_subsystem` (lines 2450-2606)
+
+#### **Critical Bug Fix: Device Name NSID Parsing**
+- **Fixed incorrect NSID extraction from device names**
+  - **Problem**: Plugin parsed NSID from device name pattern (e.g., `nvme3n5` → NSID 5), but device name suffix doesn't always match NSID
+  - **Root cause**: Linux kernel assigns device names independently of namespace IDs
+  - **Impact**: Could select wrong device when multiple namespaces exist on same subsystem
+  - **Solution**: Now reads NSID directly from sysfs (`/sys/block/nvmeXnY/nsid`) instead of parsing device name
+  - **Example**: `nvme3n5` may have NSID=3 (not 5), `nvme3n10` may have NSID=8 (not 10)
+
+### 🔧 **Technical Details**
+- **NGUID validation**: Added format validation for API-returned NGUID (UUID format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+- **Enhanced logging**: Added debug logging for each matching tier with device details and failure reasons
+- **Backward compatibility**: Gracefully falls back to NSID matching for older TrueNAS versions without `device_nguid` field
+- **Multipath support**: NGUID and NSID are identical across all controllers, ensuring correct device selection
+
+### 📊 **Impact**
+- **Eliminates race conditions**: NGUID matching is unambiguous and doesn't rely on timing or device creation order
+- **Fixes device selection bug**: Corrects NSID matching that could fail due to name parsing error
+- **Better diagnostics**: Enhanced logging helps troubleshoot device discovery issues
+- **Production-ready**: Tested with multiple simultaneous volumes on same subsystem
+
+### ✅ **Validation**
+- Tested single volume activation - NGUID matched correctly
+- Tested 3 simultaneous volumes on same subsystem - all matched without confusion
+- Verified NGUID from TrueNAS API matches sysfs NGUID exactly
+- Confirmed no device selection errors with multiple namespaces
+
+---
+
+## Version 1.1.11 (December 1, 2025)
+
+### 🐛 **Critical Bug Fix: Multi-Disk Clone Size Mismatch**
+
+#### **Fixed race condition in clone operations causing size mismatches**
+- **Fixed `_clone_image_nvme()` and `_clone_image_iscsi()` to wait for ZFS clone job completion**
+  - **Problem**: Plugin created namespaces/extents immediately after calling clone API, before async job completed
+  - **Impact**: Multi-disk VM clones failed with "output file is smaller than input file" on second and subsequent disks
+  - **Root cause**: Namespace/extent creation proceeded while ZFS clone operation was still in progress
+  - **Solution implemented**:
+    - Added job completion waiting using existing `_wait_for_job_completion()` helper
+    - 30-second timeout for clone operations
+    - Verifies cloned zvol exists and has correct size before proceeding
+    - Applies to both iSCSI and NVMe/TCP transport modes
+    - Modified `_clone_image_nvme` (lines 4408-4424) and `_clone_image_iscsi` (lines 4260-4270)
+
+### 🔧 **Technical Details**
+- Captures return value from `_tn_dataset_clone()` instead of ignoring it
+- Detects if return value is a job ID (numeric pattern matching)
+- Waits for job completion with proper error handling and logging
+- Pattern matches existing `alloc_image()` job completion handling
+- Added zvol verification step to ensure clone is ready before exposure
+- Minimal change approach - reuses existing proven helpers
+
+### 📊 **Impact**
+- **Eliminated multi-disk clone failures**: All disks now clone successfully regardless of count
+- **Both transport modes**: Fix applies to both iSCSI and NVMe/TCP
+- **Consistent behavior**: Both transport modes now handle async operations identically
+- **No API changes**: Existing configurations continue to work without modification
+
+### ✅ **Validation**
+- Tested NVMe/TCP multi-disk clone (2 disks): Both disks cloned to 100% successfully
+- Tested iSCSI multi-disk clone (2 disks): Both disks cloned to 100% successfully
+- Dev test script #25 (Multi-Disk Advanced Operations: Clone): PASSED
+- Verified no "output file is smaller than input file" errors
+- Confirmed cloned VMs boot correctly with all disks accessible
+
+---
+
+## Version 1.1.10 (November 30, 2025)
+
+### 🐛 **Critical Bug Fix: VM Migration Device Wait**
+
+#### **Fixed VM Migration for Both iSCSI and NVMe-oF-TCP**
+- **Modified `activate_volume` function to properly wait for block devices during migration** (GitHub Issue #44)
+  - **Problem**: VM migrations failed because `activate_volume` only waited 250 microseconds for block devices to appear
+  - **Impact**: All VM migrations to both iSCSI and NVMe-oF-TCP storage failed with "Could not locate device" errors
+  - **Root cause**: Volume metadata was transferred to destination node, but QEMU tried to start before block device path existed
+  - **Solution implemented** (lines 4155-4198):
+    - Added `parse_volname` call to extract LUN (iSCSI) or device UUID (NVMe) metadata from volname
+    - For iSCSI: Now calls `_device_for_lun()` which waits up to 5 seconds for `/dev/disk/by-path/` device to appear
+    - For NVMe-oF-TCP: Now calls `_nvme_device_for_uuid()` which waits up to 5 seconds for namespace device to appear
+    - Added proper error handling with detailed troubleshooting messages if device wait times out
+    - Added debug logging at level 2 for device wait operations
+
+### 🔧 **Technical Details**
+- Reuses existing proven device wait helpers that work correctly during normal volume creation
+- No new functions added - minimal change approach
+- Progressive intervention during wait (udev settle, session rescan, controller rescan)
+- Both online and offline migration scenarios validated
+- Works with multipath configurations
+
+### 📊 **Impact**
+- **Migration reliability**: Enables reliable VM migration for both iSCSI and NVMe-oF-TCP storage
+- **No breaking changes**: Backward compatible with existing configurations
+- **Proper error reporting**: If device wait times out, provides detailed troubleshooting guidance
+- **Test coverage**: Successfully tested on 3-node cluster with bidirectional migrations
+
+### ✅ **Validation**
+- Tested iSCSI offline migration (bidirectional)
+- Tested NVMe-oF-TCP offline migration (bidirectional)
+- Tested cross-transport migrations (iSCSI ↔ NVMe-oF-TCP)
+- Tested 3-node migration circuit
+- Verified device wait logic (up to 5 seconds, proper error propagation)
+- Confirmed no regressions to normal volume creation workflow
+
+### 🐛 **Critical Bug Fix: Volume Resize Race Condition**
+
+#### **Fixed race condition in volume resize causing VM crashes**
+- **Fixed `volume_resize()` function to wait for TrueNAS job completion** - Plugin now waits for resize operations to complete before rescanning iSCSI/NVMe sessions
+  - **GitHub Issue**: [#45](https://github.com/WarlockSyno/TrueNAS-Proxmox-VE-Storage-Plugin/issues/45)
+  - **Problem**: Plugin rescanned iSCSI/NVMe sessions immediately after calling TrueNAS resize API, before the async job completed
+  - **Impact**: Caused "access beyond end of device" kernel errors, I/O errors, and VM crashes during disk resize operations in multipath configurations
+  - **Root cause**: SCSI layer queried device size while TrueNAS was still processing the resize job, resulting in size mismatches
+  - **Solution implemented**:
+    - Added job completion waiting using existing `_handle_api_result_with_job_support()` helper (lines 1534-1539)
+    - 60-second timeout for resize operations (matching snapshot/delete patterns)
+    - Proper error handling with logging on job failures
+    - Only rescans iSCSI/NVMe sessions after confirmed job completion
+    - Applies to both iSCSI and NVMe/TCP transport modes
+
+### 🔧 **Technical Details**
+- Modified `volume_resize()` function in TrueNASPlugin.pm
+  - Capture API call result instead of ignoring return value (line 1527)
+  - Wait for async job completion before device rescan (lines 1534-1539)
+  - Die with clear error message if resize job fails
+  - Pattern follows established snapshot/delete implementations
+  - 5 lines added, 1 line modified - minimal change approach
+
+### 📊 **Impact**
+- **Eliminated resize crashes**: No more "access beyond end of device" errors during resize operations
+- **Multipath compatibility**: Resize operations now safe in multipath configurations
+- **Both transport modes**: Fix applies to both iSCSI and NVMe/TCP
+- **No API changes**: Existing configurations continue to work without modification
+- **Production ready**: Tested on TrueNAS SCALE 25.10.0 with both transport modes
+
+### ✅ **Validation**
+- Tested iSCSI mode: Successfully resized 10GB → 20GB without errors
+- Tested NVMe/TCP mode: Successfully resized 10GB → 20GB without errors
+- Verified no kernel errors in `dmesg` during or after resize
+- Confirmed no VM crashes or I/O errors with active workloads during resize
+- Multipath systems handle resize correctly without path failures
+
+
+---
+
+## Version 1.1.9 (November 22, 2025)
+
+### 🧹 **SCSI Device Cleanup After iSCSI Disk Deletion**
+
+#### **Automatic Cleanup of Orphaned SCSI Devices**
+- **Added automatic SCSI device cleanup to `_free_image_iscsi` function** - Prevents "ghost" SCSI devices after disk deletion
+  - **Problem**: When disks are deleted via the plugin, the Linux SCSI layer retains stale device entries with size=0
+  - **Impact**: Stale devices caused "Read Capacity failed" kernel errors on every iSCSI session rescan (10-20 log messages per stale device)
+  - **Solution implemented**:
+    - Captures by-path symlinks and resolves device names BEFORE any deletion/logout occurs (lines 3202-3226)
+    - After TrueNAS deletion succeeds, writes `1` to `/sys/block/<dev>/device/delete` to remove orphaned SCSI devices (lines 3426-3443)
+    - Best-effort cleanup - never fails the delete operation if SCSI cleanup fails
+    - Handles multipath configurations (cleans up all path devices)
+    - Debug logging at level 2 for cleanup operations
+
+### 🔧 **Technical Details**
+- Device capture occurs at function entry before any API calls
+- Uses `Cwd::abs_path()` to resolve symlinks safely
+- Validates device names match expected `sd[a-z]{1,4}` pattern
+- Cleanup runs regardless of logout status (handles both logged-in and logged-out scenarios)
+- All cleanup operations wrapped in `eval {}` for safety
+
+### 📊 **Impact**
+- **Cleaner kernel logs**: No more "Read Capacity failed" errors from deleted LUNs
+- **Faster rescans**: iSCSI session rescans no longer delayed by stale device error handling
+- **Test reliability**: Eliminates test failures caused by stale SCSI device interference
+- **Transparent operation**: No configuration required, cleanup happens automatically
+
+### ✅ **Validation**
+- Tested disk deletion flow with SCSI device verification
+- Confirmed no stale devices remain after deletion
+- Verified kernel logs show no errors on subsequent session rescans
+
+---
+
+## Version 1.1.8 (November 22, 2025)
+
+### 🔧 **Debug Logging Standardization**
+
+#### **Consistent Debug Logging Coverage**
+- **Standardized all debug logging to use `_log()` helper** with configurable verbosity levels
+  - **Problem**: Inconsistent logging - some functions used direct `syslog()` calls bypassing debug level settings, others had no logging at all
+  - **Solution implemented**:
+    - Converted ~50 direct `syslog()` calls to `_log($scfg, $level, $priority, $message)`
+    - Added `[TrueNAS]` prefix to all ~134 log messages for easy grep filtering
+    - Added entry/completion logging to previously unlogged functions
+
+### 📊 **Logging Level Assignments**
+| Level | Usage | Examples |
+|-------|-------|----------|
+| 0 | Errors (always logged) | API failures, timeouts, authentication errors |
+| 1 | Operations (debug=1) | Function entry, job completion, major operations |
+| 2 | Verbose (debug=2) | API call details, internal state, polling status |
+
+### 🆕 **Functions with New Logging**
+- `volume_resize` - entry and completion logging
+- `volume_snapshot_rollback` - entry and completion logging
+- `volume_snapshot_info` - query logging (level 2)
+- `clone_image`, `_clone_image_iscsi`, `_clone_image_nvme` - entry logging
+- `activate_volume` - activation logging (level 2)
+
+### 🔄 **Functions with Converted Logging**
+- `_retry_with_backoff` - retry attempts and errors
+- `_wait_for_job_completion` - job status polling
+- `_handle_api_result_with_job_support` - async job handling
+- `volume_snapshot`, `volume_snapshot_delete` - snapshot operations
+- `_bulk_snapshot_delete` - bulk operations
+- `_tn_dataset_delete` - dataset deletion
+- `_free_image_iscsi`, `_free_image_nvme` - volume deletion
+- `status`, `activate_storage` - storage status checks
+- `_ensure_target_visible` - pre-flight checks
+- `alloc_image` - volume allocation
+- NVMe functions - connect, disconnect, namespace operations
+
+### 📋 **Usage**
+```bash
+# Enable light debug logging
+pvesm set <storage-id> --debug 1
+
+# Enable verbose debug logging
+pvesm set <storage-id> --debug 2
+
+# Filter TrueNAS logs (works regardless of calling process)
+journalctl --since '10 minutes ago' | grep '\[TrueNAS\]'
+```
+
+### ✅ **Validation**
+- Perl syntax verified on Proxmox VE 9.x
+- All log messages include `[TrueNAS]` prefix
+- Appropriate debug levels assigned per message type
+
+---
+
 ## Version 1.1.7 (November 22, 2025)
 
 ### 🔧 **Installer Improvements**
@@ -201,8 +685,9 @@
     - Matches both standard (`nvme3n1`) and controller-specific (`nvme3c3n1`) device naming patterns
     - Verifies each device belongs to our subsystem by checking subsystem NQN in sysfs
     - Tries to match by NSID from TrueNAS API first
-    - Falls back to "newest device" detection (created within last 10 seconds)
+    - Falls back to "newest device" detection (created within last 10 seconds) - **Note**: This fallback was improved in v1.1.12 with NGUID matching and eliminated timestamp-based selection
     - Returns actual device path like `/dev/nvme3n1` or `/dev/nvme3c3n1`
+  - **Implementation**: See `_nvme_find_device_by_subsystem()` (TrueNASPlugin.pm lines 2450-2606 in v1.1.12+)
 
 #### **Multipath Portal Login**
 - **Fixed multipath failing to connect to all portals** - Storage now establishes sessions to ALL configured portals
@@ -232,7 +717,7 @@
 
 ### 🔧 **Technical Details**
 - **New functions added**:
-  - `_nvme_find_device_by_subsystem()` (lines 2368-2467) - Scans `/sys/block` for NVMe devices matching subsystem NQN, handles both standard and controller-specific naming
+  - `_nvme_find_device_by_subsystem()` (lines 2450-2606 in v1.1.12+) - Scans `/sys/block` for NVMe devices matching subsystem NQN, handles both standard and controller-specific naming, uses three-tier matching (NGUID → NSID → single device)
   - `_nvme_get_namespace_info()` (lines 2469-2482) - Queries TrueNAS WebSocket API for namespace details by device_uuid
   - `_all_portals_connected()` (lines 2018-2047) - Validates that all configured portals have active iSCSI sessions
 - **Modified `_nvme_device_for_uuid()`** (lines 2484-2565) - Now calls `_nvme_find_device_by_subsystem()` for device discovery instead of checking `/dev/disk/by-id/nvme-uuid.*`

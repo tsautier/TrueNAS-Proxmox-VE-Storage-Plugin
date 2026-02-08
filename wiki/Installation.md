@@ -230,7 +230,7 @@ Transport mode (1-2) [1]: 1
 # === If iSCSI selected ===
 iSCSI target IQN: iqn.2005-10.org.freenas.ctl:proxmox
 Portal IP (optional, press Enter to use TrueNAS IP): 192.168.1.100
-Block size [16k]: 16k
+Block size [16K]: 16K
 Enable sparse volumes? (0/1) [1]: 1
 
 # Advanced Options:
@@ -248,7 +248,7 @@ Enable multipath I/O for redundancy/load balancing? (y/N): y
 # ✓ Auto-populates host NQN from /etc/nvme/hostnqn (or generates one)
 NVMe subsystem NQN (e.g., nqn.2005-10.org.freenas.ctl:proxmox): nqn.2005-10.org.freenas.ctl:proxmox-nvme
 Portal IP (default: 192.168.1.100:4420): 192.168.1.100:4420
-Block size [16k]: 16k
+Block size [16K]: 16K
 Enable sparse volumes? (0/1) [1]: 1
 
 # NVMe/TCP uses native kernel multipath:
@@ -292,8 +292,10 @@ Portal numbers (or press Enter to skip): 1 2
 
 # Diagnostics sub-menu:
 #   1) Run health check
-#   2) Cleanup orphaned resources
-#   3) Run plugin function test
+#   2) Create diagnostics bundle
+#   3) Cleanup orphaned resources
+#   4) Run plugin function test
+#   5) Run FIO storage benchmark
 #   0) Back to main menu
 
 # === Option 1: Health Check ===
@@ -321,7 +323,17 @@ Portal numbers (or press Enter to skip): 1 2
 # transport-specific validation (iSCSI vs NVMe/TCP)
 # All labels use 30-character fixed width for consistent alignment
 
-# === Option 2: Cleanup Orphaned Resources ===
+# === Option 2: Create Diagnostics Bundle ===
+# Type "CAPTURE" (in caps) to start capture
+# Validates pvestatd is running
+# Starts 10-minute strace capture of pvestatd
+# Monitors pvestatd status during capture
+# Collects 13 diagnostic sections (plugin info, environment, storage config,
+# process state, logs, crash dumps, etc.)
+# Creates compressed tarball at /tmp/truenas-diag-TIMESTAMP.tar.gz
+# Shows file size and output location
+
+# === Option 3: Cleanup Orphaned Resources ===
 # Select storage from list
 # Scans for orphaned iSCSI resources:
 #   - Extents pointing to deleted zvols
@@ -332,7 +344,7 @@ Portal numbers (or press Enter to skip): 1 2
 # Deletes orphans in safe order (mappings → extents → zvols)
 # Note: iSCSI only - NVMe/TCP shows unsupported message
 
-# === Option 3: Run Plugin Function Test ===
+# === Option 4: Run Plugin Function Test ===
 # Displays "Plugin Function Test" header after storage selection
 # Shows test description and requirements
 # Shows what operations will be performed
@@ -610,6 +622,7 @@ If you prefer manual installation or need more control over the process, follow 
 ### Software Requirements
 - **Proxmox VE** - 8.x or later (9.x recommended for volume chains)
 - **TrueNAS SCALE** - 22.x or later (25.04+ recommended)
+  - **For TrueNAS 25.04+**: Must use WebSocket transport (`api_transport ws`) - REST API is deprecated and will be removed in 26.04
 - **Perl** - 5.36 or later (included with Proxmox VE)
 
 ### Network Requirements

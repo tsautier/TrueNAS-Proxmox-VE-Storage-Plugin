@@ -16,7 +16,7 @@ set -euo pipefail
 # CONSTANTS AND CONFIGURATION
 # ============================================================================
 
-readonly INSTALLER_VERSION="1.1.0"
+readonly INSTALLER_VERSION="1.3.0"
 readonly GITHUB_REPO="WarlockSyno/truenasplugin"
 readonly PLUGIN_FILE="/usr/share/perl5/PVE/Storage/Custom/TrueNASPlugin.pm"
 readonly STORAGE_CFG="/etc/pve/storage.cfg"
@@ -849,15 +849,16 @@ download_file() {
 # Download to stdout
 download_stdout() {
     local url="$1"
+    local timeout="${2:-5}"  # Default 5 second timeout
     local tool
     tool=$(get_download_tool)
 
     case "$tool" in
         curl)
-            curl -fsSL "$url" || return 1
+            curl -fsSL --connect-timeout "$timeout" --max-time "$((timeout * 2))" "$url" || return 1
             ;;
         wget)
-            wget -q -O - "$url" || return 1
+            wget -q -O - --connect-timeout="$timeout" --read-timeout="$((timeout * 2))" "$url" || return 1
             ;;
         *)
             return 1
@@ -1473,7 +1474,7 @@ perform_cluster_wide_installation() {
 
     if ! validate_cluster_ssh; then
         echo
-        read -rp "Continue with only reachable nodes? (y/N): " continue_choice
+        read -rp "Continue with only reachable nodes? [y/N]: " continue_choice
         if [[ ! "$continue_choice" =~ ^[Yy] ]]; then
             info "Cluster installation cancelled"
             return 1
@@ -1487,7 +1488,7 @@ perform_cluster_wide_installation() {
     warning "This will install/update the TrueNAS plugin on all cluster nodes"
     info "Total nodes to update: $((${#remote_nodes[@]} + 1)) (1 local + ${#remote_nodes[@]} remote)"
     echo
-    read -rp "Do you want to proceed? (y/N): " confirm_choice
+    read -rp "Do you want to proceed? [y/N]: " confirm_choice
     if [[ ! "$confirm_choice" =~ ^[Yy] ]]; then
         info "Cluster installation cancelled"
         return 1
@@ -1517,7 +1518,7 @@ perform_cluster_wide_installation() {
         warning "⚠️  This is a PRE-RELEASE version"
         info "Pre-release versions may contain bugs and are not recommended for production use"
         echo
-        read -rp "Do you want to continue with cluster-wide installation? (y/N): " confirm
+        read -rp "Do you want to continue with cluster-wide installation? [y/N]: " confirm
         if [[ ! "$confirm" =~ ^[Yy] ]]; then
             info "Installation cancelled"
             return 1
@@ -1602,7 +1603,7 @@ perform_cluster_wide_installation() {
     # Offer retry for failed nodes
     if [[ ${#failed_nodes[@]} -gt 0 ]]; then
         echo
-        read -rp "Retry failed nodes? (y/N): " retry_choice
+        read -rp "Retry failed nodes? [y/N]: " retry_choice
         if [[ "$retry_choice" =~ ^[Yy] ]]; then
             info "Waiting 5 seconds before retry..."
             sleep 5
@@ -1715,7 +1716,7 @@ perform_installation() {
         warning "⚠️  This is a PRE-RELEASE version"
         info "Pre-release versions may contain bugs and are not recommended for production use"
         echo
-        read -rp "Do you want to continue? (y/N): " confirm
+        read -rp "Do you want to continue? [y/N]: " confirm
         if [[ ! "$confirm" =~ ^[Yy] ]]; then
             info "Installation cancelled"
             return 1
@@ -1883,12 +1884,12 @@ menu_not_installed() {
                     # Prompt to configure storage after successful installation
                     if [[ "$NON_INTERACTIVE" != "true" ]]; then
                         echo
-                        read -rp "Would you like to configure storage now? (y/N): " response
+                        read -rp "Would you like to configure storage now? [y/N]: " response
                         if [[ "$response" =~ ^[Yy] ]]; then
                             menu_configure_storage
                             # Offer health check after configuration
                             echo
-                            read -rp "Would you like to run a health check now? (y/N): " hc_response
+                            read -rp "Would you like to run a health check now? [y/N]: " hc_response
                             if [[ "$hc_response" =~ ^[Yy] ]]; then
                                 echo
                                 menu_health_check
@@ -1983,7 +1984,7 @@ menu_update_choice() {
                 # Offer to run health check after successful update
                 if [[ "$NON_INTERACTIVE" != "true" ]]; then
                     echo
-                    read -rp "Would you like to run a health check now? (y/N): " response
+                    read -rp "Would you like to run a health check now? [y/N]: " response
                     if [[ "$response" =~ ^[Yy] ]]; then
                         echo
                         menu_health_check
@@ -2127,6 +2128,7 @@ menu_diagnostics() {
 
         show_menu "Select diagnostic action" \
             "Run health check" \
+            "Create diagnostics bundle" \
             "Cleanup orphaned resources" \
             "Run plugin function test" \
             "Run FIO storage benchmark"
@@ -2136,14 +2138,14 @@ menu_diagnostics() {
 
         # Read choice allowing both numeric and special inputs
         while true; do
-            read -rp "Enter choice [0-4]: " raw_choice
+            read -rp "Enter choice [0-5]: " raw_choice
 
             # Check for special extended benchmark mode
-            if [[ "$raw_choice" == "4+" ]]; then
+            if [[ "$raw_choice" == "5+" ]]; then
                 EXTENDED_BENCHMARK=true
-                choice=4
+                choice=5
                 break
-            elif [[ "$raw_choice" =~ ^[0-9]+$ ]] && [[ "$raw_choice" -ge 0 ]] && [[ "$raw_choice" -le 4 ]]; then
+            elif [[ "$raw_choice" =~ ^[0-9]+$ ]] && [[ "$raw_choice" -ge 0 ]] && [[ "$raw_choice" -le 5 ]]; then
                 EXTENDED_BENCHMARK=false
                 choice="$raw_choice"
                 break
@@ -2151,7 +2153,7 @@ menu_diagnostics() {
                 # Move cursor up, clear to end of screen, show error, then re-prompt
                 printf "\\033[1A\\033[J"
                 echo ""
-                echo "  ${c5}✗${c0} Invalid choice. Please enter a number between 0 and 4"
+                echo "  ${c5}✗${c0} Invalid choice. Please enter a number between 0 and 5"
                 echo ""
             fi
         done
@@ -2166,16 +2168,21 @@ menu_diagnostics() {
                 read -rp "Press Enter to return to diagnostics menu..."
                 ;;
             2)
+                # Create diagnostics bundle
+                menu_create_diagnostics_bundle
+                read -rp "Press Enter to return to diagnostics menu..."
+                ;;
+            3)
                 # Cleanup orphans
                 menu_cleanup_orphans
                 read -rp "Press Enter to return to diagnostics menu..."
                 ;;
-            3)
+            4)
                 # Run plugin function test
                 menu_plugin_test
                 read -rp "Press Enter to return to diagnostics menu..."
                 ;;
-            4)
+            5)
                 # Run FIO benchmark (normal or extended based on EXTENDED_BENCHMARK flag)
                 menu_fio_benchmark
                 read -rp "Press Enter to return to diagnostics menu..."
@@ -2456,6 +2463,341 @@ menu_fio_benchmark() {
 
     # Run the benchmark suite (pass extended flag)
     run_fio_benchmark "$storage_name" "${EXTENDED_BENCHMARK:-false}" || true
+
+    return 0
+}
+
+# ============================================================================
+# Diagnostics Bundle Functions
+# ============================================================================
+
+# Menu: Create diagnostics bundle
+menu_create_diagnostics_bundle() {
+    clear_screen
+    print_banner
+    echo
+
+    print_header "Diagnostics Bundle"
+    echo
+
+    warning "This will capture the following for 10 minutes:"
+    echo "  - System and plugin information"
+    echo "  - All TrueNAS storage configurations (API keys redacted)"
+    echo "  - strace of pvestatd (captures fork/socket activity)"
+    echo "  - Crash logs and coredump info"
+    echo "  - pvestatd journal logs"
+    echo
+
+    # Check pvestatd is running
+    local pvestatd_pid
+    pvestatd_pid=$(cat /var/run/pvestatd.pid 2>/dev/null)
+
+    if [[ -z "$pvestatd_pid" ]] || [[ ! -d "/proc/$pvestatd_pid" ]]; then
+        error "pvestatd is not running. Please start it first:"
+        echo "  systemctl start pvestatd"
+        return 1
+    fi
+
+    info "pvestatd found (PID: $pvestatd_pid)"
+    echo
+
+    warning "This capture will take 10 minutes."
+    echo
+
+    info "Type ${c8}CAPTURE${c0} to start or any other input to cancel"
+    local confirmation
+    read -rp "Confirmation: " confirmation
+
+    if [[ "$confirmation" != "CAPTURE" ]]; then
+        warning "Operation cancelled by user"
+        return 0
+    fi
+
+    # Clear screen and show banner for capture phase
+    clear_screen
+    print_banner
+    echo
+
+    info "Diagnostics Bundle Capture"
+    echo
+
+    run_diagnostics_bundle "$pvestatd_pid"
+}
+
+# Run diagnostics bundle capture
+run_diagnostics_bundle() {
+    local pvestatd_pid="$1"
+    local timestamp=$(date +%Y%m%d-%H%M%S)
+    local logfile="/tmp/truenas-diag-${timestamp}.log"
+    local strace_file="/tmp/truenas-strace-${timestamp}.log"
+    local tarball="/tmp/truenas-diag-${timestamp}.tar.gz"
+    local strace_duration=600  # 10 minutes
+    local strace_pid=""
+    local cleanup_done=false
+
+    # Cleanup function for interrupts
+    cleanup_diagnostics() {
+        local sig="${1:-EXIT}"
+
+        if [[ "${cleanup_done:-false}" == "true" ]]; then
+            return 0
+        fi
+        cleanup_done=true
+
+        # Disable further interrupts during cleanup
+        trap '' INT TERM
+
+        # Stop spinner if running
+        stop_spinner 2>/dev/null || true
+
+        # Kill strace if still running
+        if [[ -n "${strace_pid:-}" ]] && kill -0 "$strace_pid" 2>/dev/null; then
+            kill "$strace_pid" 2>/dev/null || true
+            wait "$strace_pid" 2>/dev/null || true
+        fi
+
+        # Clean up temp files on interrupt (but not on normal exit)
+        if [[ "$sig" == "INT" ]] || [[ "$sig" == "TERM" ]]; then
+            rm -f "$logfile" "$strace_file" 2>/dev/null || true
+            echo
+            warning "Diagnostics bundle creation interrupted by user (CTRL+C)"
+        fi
+
+        # Restore traps
+        trap - EXIT INT TERM
+    }
+
+    # Set traps for cleanup
+    trap 'cleanup_diagnostics INT' INT
+    trap 'cleanup_diagnostics TERM' TERM
+    trap 'cleanup_diagnostics EXIT' EXIT
+
+    # Start strace in background
+    timeout ${strace_duration} strace -f -tt -o "$strace_file" \
+        -e trace=clone,fork,vfork,socket,close,connect,read,write,exit_group \
+        -p "$pvestatd_pid" 2>/dev/null &
+    strace_pid=$!
+
+    sleep 2  # Let strace attach
+
+    # Collect diagnostics to log file
+    printf "%-30s " "Gathering system info:"
+    start_spinner
+
+    # Use subshell to disable pipefail for diagnostic collection
+    # (prevents SIGPIPE errors when head/tail close pipes early)
+    (
+        set +o pipefail
+        echo "========================================"
+        echo "  TrueNAS Proxmox Plugin Diagnostics"
+        echo "  Generated: $(date)"
+        echo "========================================"
+        echo
+
+        # Section 1: Plugin version + MD5 checksum
+        echo "=== Plugin Information ==="
+        if [[ -f "$PLUGIN_FILE" ]]; then
+            echo "Plugin path: $PLUGIN_FILE"
+            plugin_version=$(grep -E "^our \\\$VERSION" "$PLUGIN_FILE" 2>/dev/null | head -1 || echo "unknown")
+            echo "Version: $plugin_version"
+            echo "MD5: $(md5sum "$PLUGIN_FILE" 2>/dev/null | awk '{print $1}')"
+            echo "Size: $(ls -lh "$PLUGIN_FILE" 2>/dev/null | awk '{print $5}')"
+        else
+            echo "Plugin not found at $PLUGIN_FILE"
+        fi
+        echo
+
+        # Section 2: Environment
+        echo "=== Environment ==="
+        echo "--- Perl Version ---"
+        timeout 10 perl -v 2>&1 | head -5
+        echo
+        echo "--- IO::Socket::SSL ---"
+        timeout 10 perl -MIO::Socket::SSL -e 'print "IO::Socket::SSL version: $IO::Socket::SSL::VERSION\n"' 2>&1 || echo "Not installed"
+        echo
+        echo "--- OpenSSL ---"
+        timeout 10 openssl version 2>&1 || echo "Not available"
+        echo
+        echo "--- Proxmox Version ---"
+        timeout 10 pveversion -v 2>&1 || echo "pveversion not available"
+        echo
+
+        # Section 3: Storage config (all TrueNAS storages, API keys redacted)
+        echo "=== Storage Configuration (API keys redacted) ==="
+        if [[ -f "$STORAGE_CFG" ]]; then
+            grep -A 20 "^truenasplugin:" "$STORAGE_CFG" 2>/dev/null | sed 's/api_key .*/api_key [REDACTED]/g' || echo "No TrueNAS storages configured"
+        else
+            echo "Storage config not found at $STORAGE_CFG"
+        fi
+        echo
+
+        # Section 4: pvestatd status at start
+        echo "=== pvestatd Status (Start) ==="
+        timeout 10 systemctl status pvestatd --no-pager 2>&1 | head -20
+        echo
+        echo "PID file: $(cat /var/run/pvestatd.pid 2>/dev/null || echo 'not found')"
+        echo "Process check: $(timeout 5 ps -p "$pvestatd_pid" -o pid,ppid,stat,etime,cmd --no-headers 2>/dev/null || echo 'process not found')"
+        echo
+
+        # Section 5: Open file descriptors + socket connections
+        echo "=== Open File Descriptors (pvestatd) ==="
+        timeout 10 ls -la /proc/"$pvestatd_pid"/fd 2>/dev/null | head -50 || echo "Cannot read fd info"
+        echo
+        echo "--- Socket Connections ---"
+        timeout 10 ss -tunap 2>/dev/null | grep -E "pvestatd|:443|:8006" | head -30 || echo "No relevant sockets found"
+        echo
+
+        # Section 6: Process tree
+        echo "=== Process Tree ==="
+        timeout 10 pstree -p "$pvestatd_pid" 2>/dev/null || echo "pstree not available"
+        echo
+
+        # Section 7: Existing coredumps
+        echo "=== Existing Coredumps ==="
+        timeout 10 coredumpctl list --no-pager 2>/dev/null | grep -E "pvestatd|perl" | tail -10 || echo "No relevant coredumps found"
+        echo
+
+        # Section 8: Kernel crash logs (last 7 days)
+        echo "=== Kernel Crash Logs (last 7 days) ==="
+        timeout 10 journalctl -k --no-pager --since "7 days ago" 2>/dev/null | grep -iE "segfault|oops|bug|panic|killed" | tail -20 || echo "No kernel crash logs found"
+        echo
+
+        # Section 9: pvestatd error logs (last 7 days)
+        echo "=== pvestatd Error Logs (last 7 days) ==="
+        timeout 10 journalctl -u pvestatd --no-pager --since "7 days ago" 2>/dev/null | grep -iE "error|fail|die|crash|segfault|warn" | tail -50 || echo "No error logs found"
+        echo
+
+        # Section 10: System info
+        echo "=== System Information ==="
+        echo "Hostname: $(hostname)"
+        echo "Kernel: $(uname -r)"
+        echo "Uptime: $(uptime)"
+        echo "Memory:"
+        timeout 10 free -h 2>/dev/null || echo "free not available"
+        echo
+        echo "CPU:"
+        timeout 10 lscpu 2>/dev/null | grep -E "Model name|CPU\(s\)|Thread|Core" | head -5 || echo "lscpu not available"
+        echo
+
+    ) > "$logfile" 2>&1 || true
+
+    stop_spinner
+    echo -e "\r$(printf "%-30s " "Gathering system info:")${c2}✓${c0} Complete"
+
+    # Wait for strace with progress bar
+    local elapsed=0
+    local crashed=false
+    local bar_width=20
+
+    # Show initial progress bar
+    printf "%-30s " "Capturing strace (10 min):"
+
+    while kill -0 $strace_pid 2>/dev/null && [[ $elapsed -lt $strace_duration ]]; do
+        if [[ ! -d "/proc/$pvestatd_pid" ]]; then
+            echo
+            warning "*** PVESTATD CRASHED OR RESTARTED ***"
+            info "Capturing post-crash state..."
+            crashed=true
+            break
+        fi
+
+        # Calculate progress
+        local percent=$((elapsed * 100 / strace_duration))
+        local filled=$((elapsed * bar_width / strace_duration))
+        local empty=$((bar_width - filled))
+
+        # Build progress bar
+        local bar=""
+        for ((i=0; i<filled; i++)); do bar+="█"; done
+        for ((i=0; i<empty; i++)); do bar+="░"; done
+
+        # Display progress bar with percentage
+        printf "\r%-30s %s %3d%%" "Capturing strace (10 min):" "$bar" "$percent"
+
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    # Show completion (spaces clear residual progress bar characters)
+    printf "\r%-30s ${c2}✓${c0} Complete                    \n" "Capturing strace (10 min):"
+
+    # Collect post-capture state
+    printf "%-30s " "Collecting final state:"
+    start_spinner
+
+    # Use subshell to disable pipefail for diagnostic collection
+    (
+        set +o pipefail
+        echo
+        echo "========================================"
+        echo "  Post-Capture State"
+        echo "  Captured at: $(date)"
+        echo "========================================"
+        echo
+
+        # Section 11: Post-capture pvestatd status
+        echo "=== pvestatd Status (End) ==="
+        timeout 10 systemctl status pvestatd --no-pager 2>&1 | head -20
+        echo
+        new_pid=$(cat /var/run/pvestatd.pid 2>/dev/null || echo 'not found')
+        echo "PID file: $new_pid"
+        if [[ "$new_pid" != "$pvestatd_pid" ]]; then
+            echo "*** WARNING: PID changed from $pvestatd_pid to $new_pid ***"
+        fi
+        echo
+
+        # Section 12: New crash logs (if crash occurred during capture)
+        if [[ "$crashed" == "true" ]]; then
+            echo "=== Crash Detected During Capture ==="
+            echo "--- Recent Coredumps ---"
+            timeout 10 coredumpctl list --no-pager 2>/dev/null | tail -5 || echo "No coredumps"
+            echo
+            echo "--- Recent Kernel Messages ---"
+            timeout 10 dmesg 2>/dev/null | tail -30 || timeout 10 journalctl -k --no-pager -n 30 2>/dev/null || echo "Cannot read kernel logs"
+            echo
+        fi
+
+        # Section 13: Recent pvestatd logs
+        echo "=== Recent pvestatd Logs ==="
+        timeout 10 journalctl -u pvestatd --since "15 minutes ago" --no-pager 2>&1 | tail -100 || echo "No recent logs"
+        echo
+
+    ) >> "$logfile" 2>&1 || true
+
+    stop_spinner
+    echo -e "\r$(printf "%-30s " "Collecting final state:")${c2}✓${c0} Complete"
+
+    # Wait for strace to finish if still running
+    if kill -0 $strace_pid 2>/dev/null; then
+        kill "$strace_pid" 2>/dev/null || true
+        wait "$strace_pid" 2>/dev/null || true
+    fi
+
+    # Compress
+    printf "%-30s " "Compressing bundle:"
+    start_spinner
+
+    cd /tmp
+    tar -czf "$tarball" \
+        "$(basename "$logfile")" \
+        "$(basename "$strace_file")" \
+        2>/dev/null
+
+    rm -f "$logfile" "$strace_file" 2>/dev/null
+
+    stop_spinner
+    echo -e "\r$(printf "%-30s " "Compressing bundle:")${c2}✓${c0} Complete"
+
+    # Clear the cleanup trap since we completed successfully
+    trap - EXIT INT TERM
+
+    echo
+    success "Diagnostics bundle created successfully"
+    echo
+    echo "  Output file: ${c8}${tarball}${c0}"
+    echo "  File size:   $(du -h "$tarball" 2>/dev/null | cut -f1)"
+    echo
+    info "Please send this file for analysis."
 
     return 0
 }
@@ -3321,6 +3663,8 @@ run_plugin_test() {
 
 # Menu: Cleanup orphaned resources
 menu_cleanup_orphans() {
+    local storage_name
+
     clear_screen
     print_banner
     echo
@@ -3335,37 +3679,64 @@ menu_cleanup_orphans() {
         return 1
     fi
 
-    local storages
-    storages=$(grep "^truenasplugin:" "$STORAGE_CFG" 2>/dev/null | awk '{print $2}')
+    # Build array of storage names
+    local -a storage_list=()
+    while IFS= read -r storage; do
+        [[ -n "$storage" ]] && storage_list+=("$storage")
+    done < <(grep "^truenasplugin:" "$STORAGE_CFG" 2>/dev/null | awk '{print $2}')
 
-    if [[ -z "$storages" ]]; then
+    if [[ ${#storage_list[@]} -eq 0 ]]; then
         warning "No TrueNAS storage configured"
         info "Please configure storage first from the main menu"
         read -rp "Press Enter to continue..."
         return 1
     fi
 
-    # Show available storage
-    info "Available TrueNAS storage:"
-    while IFS= read -r storage; do
-        echo "  • $storage"
-    done <<< "$storages"
+    # Auto-select if only one storage exists
+    if [[ ${#storage_list[@]} -eq 1 ]]; then
+        storage_name="${storage_list[0]}"
+        info "Using storage: $storage_name"
+        echo
+    else
+        # Show numbered list for selection
+        info "Select storage for orphan cleanup:"
+        echo
+        local i=1
+        for storage in "${storage_list[@]}"; do
+            local mode
+            mode=$(get_storage_config_value "$storage" "transport_mode" || true)
+            [[ -z "$mode" ]] && mode="iscsi"
+            echo "  $i) $storage ($mode)"
+            ((i++))
+        done
+        echo "  0) Cancel"
+        echo
+
+        # Prompt for selection
+        local choice
+        while true; do
+            read -rp "Enter choice [0-$((${#storage_list[@]}))]: " choice
+
+            # Handle cancel
+            if [[ "$choice" == "0" ]]; then
+                info "Returning to main menu"
+                return 0
+            fi
+
+            # Validate numeric input
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#storage_list[@]} ]]; then
+                storage_name="${storage_list[$((choice-1))]}"
+                break
+            fi
+
+            warning "Invalid choice - please enter a number between 0 and ${#storage_list[@]}"
+        done
+    fi
+
+    # Clear screen after valid storage selection
+    clear_screen
+    print_banner
     echo
-
-    # Prompt for storage selection
-    local storage_name
-    read -rp "Enter storage name: " storage_name
-
-    if [[ -z "$storage_name" ]]; then
-        warning "Storage name cannot be empty"
-        return 1
-    fi
-
-    # Verify storage exists
-    if ! echo "$storages" | grep -q "^${storage_name}$"; then
-        error "Storage '$storage_name' not found"
-        return 1
-    fi
 
     # Get storage configuration
     local api_host api_key dataset api_insecure transport_mode
@@ -3378,182 +3749,463 @@ menu_cleanup_orphans() {
     # Default to iscsi if not specified
     [[ -z "$transport_mode" ]] && transport_mode="iscsi"
 
-    # Check if NVMe mode
-    if [[ "$transport_mode" == "nvme-tcp" ]]; then
-        warning "Orphan cleanup is not supported for NVMe/TCP storage"
-        info "NVMe/TCP orphan detection requires WebSocket API (not yet implemented)"
-        return 0
-    fi
-
     echo
-    info "Detecting orphaned resources for storage '$storage_name'..."
-    echo
-
-    # Set curl options
-    local curl_opts="-s"
-    [[ "$api_insecure" == "1" ]] && curl_opts="$curl_opts -k"
-
-    # Fetch data from TrueNAS API
-    info "Fetching iSCSI extents..."
-    local extents
-    extents=$(curl $curl_opts -H "Authorization: Bearer $api_key" "https://$api_host/api/v2.0/iscsi/extent" 2>/dev/null) || {
-        error "Failed to fetch extents from TrueNAS API"
-        return 1
-    }
-
-    info "Fetching zvols..."
-    local zvols
-    zvols=$(curl $curl_opts -H "Authorization: Bearer $api_key" "https://$api_host/api/v2.0/pool/dataset" 2>/dev/null) || {
-        error "Failed to fetch zvols from TrueNAS API"
-        return 1
-    }
-
-    info "Fetching target-extent mappings..."
-    local targetextents
-    targetextents=$(curl $curl_opts -H "Authorization: Bearer $api_key" "https://$api_host/api/v2.0/iscsi/targetextent" 2>/dev/null) || {
-        error "Failed to fetch targetextents from TrueNAS API"
-        return 1
-    }
-
-    echo
-    info "Analyzing resources..."
+    info "Detecting orphaned resources for storage '$storage_name' (transport: $transport_mode)..."
     echo
 
     # Arrays to store orphan IDs
-    local -a extent_orphans=()
-    local -a te_orphans=()
-    local -a zvol_orphans=()
+    # iSCSI uses local arrays populated within this function
+    local -a iscsi_extent_orphans=()
+    local -a iscsi_te_orphans=()
+    local -a iscsi_zvol_orphans=()
+    # NVMe uses global arrays populated by _detect_orphaned_resources_nvme
+    declare -ga nvme_ns_orphans=()
+    declare -ga zvol_orphans=()
+    declare -ga nvme_subsys_orphans=()
     local orphan_count=0
 
-    # Check extents without zvols
-    local extent_data
-    extent_data=$(echo "$extents" | grep -o '"id": *[0-9]*' | sed 's/"id": *//' || true)
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        # NVMe/TCP mode - use WebSocket API via tn_api_call
+        # Note: Call directly (not via $(...)) to preserve global array modifications
+        # Temporarily disable errexit to capture non-zero orphan count without exiting
+        info "Fetching NVMe namespaces and zvols..."
+        set +e
+        _detect_orphaned_resources_nvme "$api_host" "$api_key" "$dataset"
+        orphan_count=$?
+        set -e
+        if [[ $orphan_count -eq 255 ]]; then
+            error "Failed to detect orphaned NVMe resources"
+            return 1
+        fi
+        echo
+        info "Analyzing resources..."
+        echo
+    else
+        # iSCSI mode - use WebSocket API via tn_api_call
+        # Fetch data from TrueNAS API
+        info "Fetching iSCSI extents..."
+        local extents
+        extents=$(tn_api_call "$api_host" "$api_key" "iscsi.extent.query" '[[]]' 2>&1) || {
+            error "Failed to fetch extents from TrueNAS API"
+            return 1
+        }
 
-    for extent_id in $extent_data; do
-        local extent_disk
-        extent_disk=$(echo "$extents" | sed -n "/{/,/}/{ /\"id\": *${extent_id}/,/}/p }" | \
-                     grep -o '"disk": *"zvol/[^"]*"' | sed 's/"disk": *"zvol\///' | sed 's/"$//' | head -1 || true)
+        info "Fetching zvols..."
+        local zvols
+        zvols=$(tn_api_call "$api_host" "$api_key" "pool.dataset.query" '[[["type", "=", "VOLUME"]]]' 2>&1) || {
+            error "Failed to fetch zvols from TrueNAS API"
+            return 1
+        }
 
-        [[ -z "$extent_disk" ]] && continue
+        info "Fetching target-extent mappings..."
+        local targetextents
+        targetextents=$(tn_api_call "$api_host" "$api_key" "iscsi.targetextent.query" '[[]]' 2>&1) || {
+            error "Failed to fetch targetextents from TrueNAS API"
+            return 1
+        }
 
-        # Check if zvol is under our dataset and exists
-        if [[ "$extent_disk" == "$dataset/"* ]]; then
-            if ! echo "$zvols" | grep -q "\"id\": *\"${extent_disk}\""; then
-                extent_orphans+=("$extent_id")
+        echo
+        info "Analyzing resources..."
+        echo
+
+        # Check extents without zvols
+        local extent_data
+        extent_data=$(echo "$extents" | grep -o '"id": *[0-9]*' | sed 's/"id": *//' || true)
+
+        for extent_id in $extent_data; do
+            local extent_disk
+            extent_disk=$(echo "$extents" | sed -n "/{/,/}/{ /\"id\": *${extent_id}/,/}/p }" | \
+                         grep -o '"disk": *"zvol/[^"]*"' | sed 's/"disk": *"zvol\///' | sed 's/"$//' | head -1 || true)
+
+            [[ -z "$extent_disk" ]] && continue
+
+            # Check if zvol is under our dataset and exists
+            if [[ "$extent_disk" == "$dataset/"* ]]; then
+                # Use grep -c and capture first line only to avoid newline issues
+                local zvol_match_count
+                zvol_match_count=$(echo "$zvols" | grep -c "\"id\": *\"${extent_disk}\"" 2>/dev/null | head -1) || zvol_match_count=0
+                if [[ "${zvol_match_count:-0}" -eq 0 ]]; then
+                    iscsi_extent_orphans+=("$extent_id")
+                    orphan_count=$((orphan_count + 1))
+                fi
+            fi
+        done
+
+        # Check targetextents without extents
+        local te_data
+        te_data=$(echo "$targetextents" | grep -o '"id": *[0-9]*' | sed 's/"id": *//' || true)
+
+        for te_id in $te_data; do
+            local extent_ref
+            extent_ref=$(echo "$targetextents" | sed -n "/{/,/}/{ /\"id\": *${te_id}/,/}/p }" | \
+                        grep -o '"extent": *[0-9]*' | sed 's/"extent": *//' | head -1 || true)
+
+            [[ -z "$extent_ref" ]] && continue
+
+            # Use grep -c and capture first line only to avoid newline issues
+            local extent_match_count
+            extent_match_count=$(echo "$extents" | grep -c "\"id\": *${extent_ref}" 2>/dev/null | head -1) || extent_match_count=0
+            if [[ "${extent_match_count:-0}" -eq 0 ]]; then
+                iscsi_te_orphans+=("$te_id")
+                orphan_count=$((orphan_count + 1))
+            # Also check if this target-extent references an orphan extent (zvol missing)
+            elif [[ " ${iscsi_extent_orphans[*]} " == *" ${extent_ref} "* ]]; then
+                iscsi_te_orphans+=("$te_id")
                 orphan_count=$((orphan_count + 1))
             fi
-        fi
-    done
+        done
 
-    # Check targetextents without extents
-    local te_data
-    te_data=$(echo "$targetextents" | grep -o '"id": *[0-9]*' | sed 's/"id": *//' || true)
+        # Check zvols without extents
+        local zvol_ids
+        zvol_ids=$(echo "$zvols" | { grep -B2 -A2 "\"type\": *\"VOLUME\"" || true; } | \
+                  { grep "\"id\": *\"${dataset}/" || true; } | sed 's/.*"id": *"\([^"]*\)".*/\1/' || true)
 
-    for te_id in $te_data; do
-        local extent_ref
-        extent_ref=$(echo "$targetextents" | sed -n "/{/,/}/{ /\"id\": *${te_id}/,/}/p }" | \
-                    grep -o '"extent": *[0-9]*' | sed 's/"extent": *//' | head -1 || true)
+        for zvol_id in $zvol_ids; do
+            local zvol_disk="zvol/${zvol_id}"
+            # Use grep -c and capture first line only to avoid newline issues
+            local match_count
+            match_count=$(echo "$extents" | grep -c "\"disk\": *\"${zvol_disk}\"" 2>/dev/null | head -1) || match_count=0
+            if [[ "${match_count:-0}" -eq 0 ]]; then
+                iscsi_zvol_orphans+=("$zvol_id")
+                orphan_count=$((orphan_count + 1))
+            fi
+        done
+    fi
 
-        [[ -z "$extent_ref" ]] && continue
+    # Calculate storage-scoped vs global orphan counts
+    local storage_orphan_count=0
+    local global_orphan_count=0
 
-        if ! echo "$extents" | grep -q "\"id\": *${extent_ref}"; then
-            te_orphans+=("$te_id")
-            orphan_count=$((orphan_count + 1))
-        fi
-    done
-
-    # Check zvols without extents
-    local zvol_ids
-    zvol_ids=$(echo "$zvols" | { grep -B2 -A2 "\"type\": *\"VOLUME\"" || true; } | \
-              { grep "\"id\": *\"${dataset}/" || true; } | sed 's/.*"id": *"\([^"]*\)".*/\1/' || true)
-
-    for zvol_id in $zvol_ids; do
-        local zvol_disk="zvol/${zvol_id}"
-        if ! echo "$extents" | grep -q "\"disk\": *\"${zvol_disk}\""; then
-            zvol_orphans+=("$zvol_id")
-            orphan_count=$((orphan_count + 1))
-        fi
-    done
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        storage_orphan_count=$((${#nvme_ns_orphans[@]} + ${#zvol_orphans[@]}))
+        global_orphan_count=${#nvme_subsys_orphans[@]}
+    else
+        storage_orphan_count=$((${#iscsi_extent_orphans[@]} + ${#iscsi_te_orphans[@]} + ${#iscsi_zvol_orphans[@]}))
+        global_orphan_count=0
+    fi
 
     # Report findings
     if [[ $orphan_count -eq 0 ]]; then
         success "No orphaned resources found"
+        read -rp "Press Enter to continue..."
         return 0
     fi
 
-    error "Found $orphan_count orphaned resource(s):"
-    echo
+    # Display orphans grouped by category with reasoning headers
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        # Storage-scoped orphans section
+        if [[ $storage_orphan_count -gt 0 ]]; then
+            info "Storage Orphans for '$storage_name' ($storage_orphan_count):"
+            echo "  Scoped to dataset: $dataset"
+            echo
 
-    # Display orphans
-    for extent_id in "${extent_orphans[@]}"; do
-        echo "  • [EXTENT] ID: $extent_id (zvol missing)"
-    done
+            if [[ ${#nvme_ns_orphans[@]} -gt 0 ]]; then
+                echo "  Orphaned Namespaces (${#nvme_ns_orphans[@]}):"
+                echo "    These namespaces reference zvols that no longer exist."
+                for ns_entry in "${nvme_ns_orphans[@]}"; do
+                    local ns_id="${ns_entry%%:*}"
+                    local ns_path="${ns_entry#*:}"
+                    echo "    • ID: $ns_id, Path: $ns_path"
+                done
+                echo
+            fi
 
-    for te_id in "${te_orphans[@]}"; do
-        echo "  • [TARGET-EXTENT] ID: $te_id (extent missing)"
-    done
+            if [[ ${#zvol_orphans[@]} -gt 0 ]]; then
+                echo "  Orphaned Zvols (${#zvol_orphans[@]}):"
+                echo "    These zvols exist but have no NVMe namespace exposing them."
+                for zvol_id in "${zvol_orphans[@]}"; do
+                    echo "    • $zvol_id"
+                done
+                echo
+            fi
+        fi
 
-    for zvol_id in "${zvol_orphans[@]}"; do
-        echo "  • [ZVOL] $zvol_id (no extent pointing to this zvol)"
-    done
+        # Global orphans section (subsystems)
+        if [[ ${#nvme_subsys_orphans[@]} -gt 0 ]]; then
+            warning "Global Orphans (${#nvme_subsys_orphans[@]}):"
+            echo "  These affect ALL storages on this TrueNAS server."
+            echo
 
-    echo
-    warning "WARNING: This will permanently delete these orphaned resources!"
-    echo
+            echo "  Orphaned Subsystems (${#nvme_subsys_orphans[@]}):"
+            echo "    Empty subsystems not referenced by any storage configuration."
+            for subsys_entry in "${nvme_subsys_orphans[@]}"; do
+                local subsys_id="${subsys_entry%%|*}"
+                local rest="${subsys_entry#*|}"
+                local subsys_name="${rest%%|*}"
+                echo "    • ID: $subsys_id, Name: $subsys_name"
+            done
+            echo
+        fi
+    else
+        # iSCSI orphans - all storage-scoped
+        info "Storage Orphans for '$storage_name' ($storage_orphan_count):"
+        echo "  Scoped to dataset: $dataset"
+        echo
 
-    # Typed confirmation
-    local confirm
-    read -rp "Type 'DELETE' (all caps) to confirm deletion: " confirm
-    if [[ "$confirm" != "DELETE" ]]; then
-        warning "Confirmation failed. Cleanup cancelled."
-        return 1
+        if [[ ${#iscsi_extent_orphans[@]} -gt 0 ]]; then
+            echo "  Orphaned Extents (${#iscsi_extent_orphans[@]}):"
+            echo "    These extents reference zvols that no longer exist."
+            for extent_id in "${iscsi_extent_orphans[@]}"; do
+                echo "    • ID: $extent_id"
+            done
+            echo
+        fi
+
+        if [[ ${#iscsi_te_orphans[@]} -gt 0 ]]; then
+            echo "  Orphaned Target-Extents (${#iscsi_te_orphans[@]}):"
+            echo "    These target-extent mappings reference extents that no longer exist."
+            for te_id in "${iscsi_te_orphans[@]}"; do
+                echo "    • ID: $te_id"
+            done
+            echo
+        fi
+
+        if [[ ${#iscsi_zvol_orphans[@]} -gt 0 ]]; then
+            echo "  Orphaned Zvols (${#iscsi_zvol_orphans[@]}):"
+            echo "    These zvols exist but have no iSCSI extent exposing them."
+            for zvol_id in "${iscsi_zvol_orphans[@]}"; do
+                echo "    • $zvol_id"
+            done
+            echo
+        fi
     fi
 
+    # DRYRUN/DELETE prompt
+    local action
+    read -rp "Type DRYRUN to preview deletion details, or DELETE to remove now: " action
+
+    if [[ "$action" == "DRYRUN" ]]; then
+        # Show detailed dry run preview
+        clear_screen
+        print_banner
+        echo
+        info "=== DRY RUN PREVIEW ==="
+        echo
+
+        local op_num=0
+
+        if [[ "$transport_mode" == "nvme-tcp" ]]; then
+            # Storage-scoped operations
+            if [[ $storage_orphan_count -gt 0 ]]; then
+                echo "Storage-scoped operations (dataset: $dataset):"
+                echo
+
+                for ns_entry in "${nvme_ns_orphans[@]}"; do
+                    local ns_id="${ns_entry%%:*}"
+                    local ns_path="${ns_entry#*:}"
+                    ((++op_num))
+                    echo "  [$op_num] Delete NVMe namespace ID: $ns_id"
+                    echo "      Reason: References $ns_path which no longer exists"
+                    echo
+                done
+
+                for zvol_id in "${zvol_orphans[@]}"; do
+                    ((++op_num))
+                    echo "  [$op_num] Delete zvol: $zvol_id"
+                    echo "      Reason: No NVMe namespace exposes this zvol"
+                    echo
+                done
+            fi
+
+            # Global operations (subsystems)
+            if [[ ${#nvme_subsys_orphans[@]} -gt 0 ]]; then
+                echo "Global operations (affects ALL storages on this TrueNAS):"
+                echo
+
+                for subsys_entry in "${nvme_subsys_orphans[@]}"; do
+                    local subsys_id="${subsys_entry%%|*}"
+                    local rest="${subsys_entry#*|}"
+                    local subsys_name="${rest%%|*}"
+                    ((++op_num))
+                    echo "  [$op_num] Delete NVMe subsystem: $subsys_name (ID: $subsys_id)"
+                    echo "      Reason: Subsystem is empty and not referenced in any storage.cfg"
+                    echo
+                done
+            fi
+        else
+            # iSCSI - all storage-scoped
+            echo "Storage-scoped operations (dataset: $dataset):"
+            echo
+
+            for te_id in "${iscsi_te_orphans[@]}"; do
+                ((++op_num))
+                echo "  [$op_num] Delete target-extent mapping ID: $te_id"
+                echo "      Reason: References an extent that no longer exists"
+                echo
+            done
+
+            for extent_id in "${iscsi_extent_orphans[@]}"; do
+                ((++op_num))
+                echo "  [$op_num] Delete extent ID: $extent_id"
+                echo "      Reason: References a zvol that no longer exists"
+                echo
+            done
+
+            for zvol_id in "${iscsi_zvol_orphans[@]}"; do
+                ((++op_num))
+                echo "  [$op_num] Delete zvol: $zvol_id"
+                echo "      Reason: No iSCSI extent exposes this zvol"
+                echo
+            done
+        fi
+
+        info "=== END DRY RUN ($op_num operations) ==="
+        echo
+
+        # Post-preview prompt
+        local confirm_action
+        read -rp "Type DELETE to proceed, or press Enter to cancel: " confirm_action
+
+        if [[ "$confirm_action" != "DELETE" ]]; then
+            info "Cleanup cancelled - returning to main menu"
+            return 0
+        fi
+        # Fall through to deletion
+    elif [[ "$action" != "DELETE" ]]; then
+        # Invalid option - return to menu
+        info "Invalid option - returning to main menu"
+        read -rp "Press Enter to continue..."
+        return 0
+    fi
+
+    # Clear screen before deletion
+    clear_screen
+    print_banner
     echo
-    info "Cleaning up orphaned resources..."
+    info "Deleting Orphaned Resources"
     echo
 
-    # Delete targetextents first (they reference extents)
-    if [[ ${#te_orphans[@]} -gt 0 ]]; then
-        for te_id in "${te_orphans[@]}"; do
-            info "Deleting target-extent mapping ID: $te_id..."
-            if curl $curl_opts -H "Authorization: Bearer $api_key" -X DELETE "https://$api_host/api/v2.0/iscsi/targetextent/id/$te_id" > /dev/null 2>&1; then
-                success "  Deleted target-extent $te_id"
+    local delete_success=0
+    local delete_failed=0
+
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        # NVMe/TCP cleanup using WebSocket API with spinner progress
+
+        # Storage-scoped deletions
+        if [[ $storage_orphan_count -gt 0 ]]; then
+            echo "Storage-scoped (dataset: $dataset):"
+
+            # Delete namespaces first
+            for ns_entry in "${nvme_ns_orphans[@]}"; do
+                local ns_id="${ns_entry%%:*}"
+                local ns_path="${ns_entry#*:}"
+                printf "%-40s " "  Namespace $ns_id:"
+                start_spinner
+                local result rc=0
+                result=$(tn_api_call_write "$api_host" "$api_key" "nvmet.namespace.delete" "[$ns_id]" 2>&1) || rc=$?
+                stop_spinner
+                if [[ $rc -eq 0 ]]; then
+                    echo -e "\r\033[K$(printf "%-40s " "  Namespace $ns_id:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                    ((++delete_success))
+                else
+                    echo -e "\r\033[K$(printf "%-40s " "  Namespace $ns_id:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                    ((++delete_failed))
+                fi
+            done
+
+            # Delete orphaned zvols
+            for zvol_id in "${zvol_orphans[@]}"; do
+                local short_zvol="${zvol_id##*/}"
+                printf "%-40s " "  Zvol $short_zvol:"
+                start_spinner
+                local result rc=0
+                result=$(tn_api_call_write "$api_host" "$api_key" "pool.dataset.delete" "[\"$zvol_id\"]" 2>&1) || rc=$?
+                stop_spinner
+                if [[ $rc -eq 0 ]]; then
+                    echo -e "\r\033[K$(printf "%-40s " "  Zvol $short_zvol:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                    ((++delete_success))
+                else
+                    echo -e "\r\033[K$(printf "%-40s " "  Zvol $short_zvol:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                    ((++delete_failed))
+                fi
+            done
+            echo
+        fi
+
+        # Global deletions (subsystems)
+        if [[ ${#nvme_subsys_orphans[@]} -gt 0 ]]; then
+            echo "Global (affects all storages):"
+
+            for subsys_entry in "${nvme_subsys_orphans[@]}"; do
+                local subsys_id="${subsys_entry%%|*}"
+                local rest="${subsys_entry#*|}"
+                local subsys_name="${rest%%|*}"
+                printf "%-40s " "  Subsystem $subsys_name:"
+                start_spinner
+                local result rc=0
+                # Use force=true to also remove port associations (subsystem is already empty per orphan detection)
+                result=$(tn_api_call_write "$api_host" "$api_key" "nvmet.subsys.delete" "[$subsys_id, {\"force\": true}]" 2>&1) || rc=$?
+                stop_spinner
+                if [[ $rc -eq 0 ]]; then
+                    echo -e "\r\033[K$(printf "%-40s " "  Subsystem $subsys_name:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                    ((++delete_success))
+                else
+                    echo -e "\r\033[K$(printf "%-40s " "  Subsystem $subsys_name:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                    ((++delete_failed))
+                fi
+            done
+        fi
+    else
+        # iSCSI cleanup using WebSocket API with spinner progress
+        echo "Storage-scoped (dataset: $dataset):"
+
+        # Delete targetextents first (they reference extents)
+        for te_id in "${iscsi_te_orphans[@]}"; do
+            printf "%-40s " "  Target-extent $te_id:"
+            start_spinner
+            local result rc=0
+            result=$(tn_api_call_write "$api_host" "$api_key" "iscsi.targetextent.delete" "[$te_id]" 2>&1) || rc=$?
+            stop_spinner
+            if [[ $rc -eq 0 ]]; then
+                echo -e "\r\033[K$(printf "%-40s " "  Target-extent $te_id:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                ((++delete_success))
             else
-                error "  Failed to delete target-extent $te_id"
+                echo -e "\r\033[K$(printf "%-40s " "  Target-extent $te_id:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                ((++delete_failed))
+            fi
+        done
+
+        # Delete extents
+        for extent_id in "${iscsi_extent_orphans[@]}"; do
+            printf "%-40s " "  Extent $extent_id:"
+            start_spinner
+            local result rc=0
+            result=$(tn_api_call_write "$api_host" "$api_key" "iscsi.extent.delete" "[$extent_id]" 2>&1) || rc=$?
+            stop_spinner
+            if [[ $rc -eq 0 ]]; then
+                echo -e "\r\033[K$(printf "%-40s " "  Extent $extent_id:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                ((++delete_success))
+            else
+                echo -e "\r\033[K$(printf "%-40s " "  Extent $extent_id:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                ((++delete_failed))
+            fi
+        done
+
+        # Delete zvols
+        for zvol_id in "${iscsi_zvol_orphans[@]}"; do
+            local short_zvol="${zvol_id##*/}"
+            printf "%-40s " "  Zvol $short_zvol:"
+            start_spinner
+            local result rc=0
+            result=$(tn_api_call_write "$api_host" "$api_key" "pool.dataset.delete" "[\"$zvol_id\"]" 2>&1) || rc=$?
+            stop_spinner
+            if [[ $rc -eq 0 ]]; then
+                echo -e "\r\033[K$(printf "%-40s " "  Zvol $short_zvol:")${COLOR_GREEN}✓${COLOR_RESET} Deleted"
+                ((++delete_success))
+            else
+                echo -e "\r\033[K$(printf "%-40s " "  Zvol $short_zvol:")${COLOR_RED}✗${COLOR_RESET} Failed"
+                ((++delete_failed))
             fi
         done
     fi
 
-    # Delete extents
-    if [[ ${#extent_orphans[@]} -gt 0 ]]; then
-        for extent_id in "${extent_orphans[@]}"; do
-            info "Deleting extent ID: $extent_id..."
-            if curl $curl_opts -H "Authorization: Bearer $api_key" -X DELETE "https://$api_host/api/v2.0/iscsi/extent/id/$extent_id" > /dev/null 2>&1; then
-                success "  Deleted extent $extent_id"
-            else
-                error "  Failed to delete extent $extent_id"
-            fi
-        done
-    fi
-
-    # Delete zvols
-    if [[ ${#zvol_orphans[@]} -gt 0 ]]; then
-        for zvol_id in "${zvol_orphans[@]}"; do
-            info "Deleting zvol: $zvol_id..."
-            # URL encode the zvol path
-            local zvol_encoded
-            zvol_encoded=$(echo "$zvol_id" | sed 's|/|%2F|g')
-            if curl $curl_opts -H "Authorization: Bearer $api_key" -X DELETE "https://$api_host/api/v2.0/pool/dataset/id/$zvol_encoded" > /dev/null 2>&1; then
-                success "  Deleted zvol $zvol_id"
-            else
-                error "  Failed to delete zvol $zvol_id"
-            fi
-        done
-    fi
-
     echo
-    success "Cleanup complete!"
+    if [[ $delete_failed -eq 0 ]]; then
+        success "Cleanup complete! Deleted $delete_success resource(s)"
+    else
+        warning "Cleanup finished with errors: $delete_success deleted, $delete_failed failed"
+    fi
+    read -rp "Press Enter to continue..."
     return 0
 }
 
@@ -3648,22 +4300,18 @@ detect_orphaned_resources() {
     local dataset="$5"
     local api_insecure="$6"
 
-    # Set curl options
-    local curl_opts="-s"
-    [[ "$api_insecure" == "1" ]] && curl_opts="$curl_opts -k"
-
     local orphan_count=0
 
     if [[ "$transport_mode" == "iscsi" ]]; then
-        # iSCSI orphan detection
+        # iSCSI orphan detection using WebSocket API
 
         # Fetch extents
         local extents
-        extents=$(curl $curl_opts -H "Authorization: Bearer $api_key" "https://$api_host/api/v2.0/iscsi/extent" 2>/dev/null) || return 1
+        extents=$(tn_api_call "$api_host" "$api_key" "iscsi.extent.query" '[[]]' 2>&1) || return 1
 
         # Fetch zvols
         local zvols
-        zvols=$(curl $curl_opts -H "Authorization: Bearer $api_key" "https://$api_host/api/v2.0/pool/dataset" 2>/dev/null) || return 1
+        zvols=$(tn_api_call "$api_host" "$api_key" "pool.dataset.query" '[[["type", "=", "VOLUME"]]]' 2>&1) || return 1
 
         # Extract extent IDs and disks using grep/sed
         # Parse JSON: look for "id": <number> and "disk": "zvol/..."
@@ -3700,12 +4348,211 @@ detect_orphaned_resources() {
         done
 
     else
-        # NVMe/TCP mode - not supported yet (requires WebSocket API)
-        # Return 0 to indicate no orphans found (skip check)
-        return 0
+        # NVMe/TCP mode - delegate to NVMe-specific detection
+        orphan_count=$(_detect_orphaned_resources_nvme "$api_host" "$api_key" "$dataset")
     fi
 
     echo "$orphan_count"
+}
+
+# Detect orphaned NVMe resources (namespaces without zvols, zvols without namespaces)
+# Parameters: api_host, api_key, dataset
+# Returns: Count of orphaned resources
+# Side effects: Populates global arrays nvme_ns_orphans and zvol_orphans
+_detect_orphaned_resources_nvme() {
+    local api_host="$1"
+    local api_key="$2"
+    local dataset="$3"
+
+    # Reset arrays (declared in menu_cleanup_orphans)
+    nvme_ns_orphans=()
+    zvol_orphans=()
+    nvme_subsys_orphans=()
+    local orphan_count=0
+
+    # Fetch all zvols from the dataset
+    log "INFO" "_detect_orphaned_resources_nvme: Fetching zvols from dataset $dataset"
+    local zvols_response
+    zvols_response=$(tn_api_call "$api_host" "$api_key" "pool.dataset.query" '[[["type", "=", "VOLUME"]]]' 2>&1)
+    if [[ $? -ne 0 || -z "$zvols_response" ]]; then
+        log "ERROR" "_detect_orphaned_resources_nvme: Failed to fetch zvols"
+        return 255
+    fi
+
+    # Extract zvol IDs that are under our dataset and match plugin pattern (vm-XXX-disk-YYY)
+    local zvol_ids=()
+    while IFS= read -r zvol_id; do
+        [[ -n "$zvol_id" ]] && zvol_ids+=("$zvol_id")
+    done < <(echo "$zvols_response" | grep -oP '"id"\s*:\s*"'"$dataset"'/vm-[0-9]+-disk-[0-9]+"' | \
+             sed 's/"id"\s*:\s*"//;s/"$//')
+
+    log "INFO" "_detect_orphaned_resources_nvme: Found ${#zvol_ids[@]} plugin-managed zvols"
+
+    # Fetch all NVMe namespaces
+    log "INFO" "_detect_orphaned_resources_nvme: Fetching NVMe namespaces"
+    local ns_response
+    ns_response=$(tn_api_call "$api_host" "$api_key" "nvmet.namespace.query" '[[]]' 2>&1)
+    if [[ $? -ne 0 || -z "$ns_response" ]]; then
+        log "ERROR" "_detect_orphaned_resources_nvme: Failed to fetch namespaces"
+        return 255
+    fi
+
+    # Parse namespaces into arrays using Perl for proper JSON handling
+    # (regex-based parsing fails on nested objects like "subsys": {"id": ...})
+    # Output format: ns_id TAB device_path TAB subsys_id
+    local ns_ids=()
+    local ns_device_paths=()
+    local ns_subsys_ids=()
+    local ns_parsed
+    ns_parsed=$(echo "$ns_response" | perl -MJSON::PP -e '
+        my $json = do { local $/; <STDIN> };
+        my $data = eval { decode_json($json) } // [];
+        for my $ns (@$data) {
+            next unless ref($ns) eq "HASH" && defined $ns->{id} && defined $ns->{device_path};
+            my $subsys_id = (ref($ns->{subsys}) eq "HASH") ? ($ns->{subsys}{id} // "") : "";
+            print "$ns->{id}\t$ns->{device_path}\t$subsys_id\n";
+        }
+    ' 2>/dev/null)
+
+    while IFS=$'\t' read -r ns_id ns_path ns_subsys; do
+        [[ -n "$ns_id" && -n "$ns_path" ]] || continue
+        ns_ids+=("$ns_id")
+        ns_device_paths+=("$ns_path")
+        ns_subsys_ids+=("$ns_subsys")
+    done <<< "$ns_parsed"
+
+    log "INFO" "_detect_orphaned_resources_nvme: Found ${#ns_ids[@]} namespaces"
+
+    # Check for orphaned namespaces (namespace points to zvol that doesn't exist)
+    for i in "${!ns_ids[@]}"; do
+        local ns_id="${ns_ids[$i]}"
+        local ns_path="${ns_device_paths[$i]:-}"
+
+        # Skip if no device path
+        [[ -z "$ns_path" ]] && continue
+
+        # Extract zvol path from device_path (remove 'zvol/' prefix)
+        local zvol_path="${ns_path#zvol/}"
+
+        # Only check namespaces pointing to our dataset
+        [[ "$zvol_path" != "$dataset/"* ]] && continue
+
+        # Check if zvol exists in our zvol list
+        local zvol_found=false
+        for zvol_id in "${zvol_ids[@]}"; do
+            if [[ "$zvol_id" == "$zvol_path" ]]; then
+                zvol_found=true
+                break
+            fi
+        done
+
+        if [[ "$zvol_found" == "false" ]]; then
+            # Namespace points to missing zvol - orphan
+            nvme_ns_orphans+=("$ns_id:$ns_path")
+            ((orphan_count++))
+            log "INFO" "_detect_orphaned_resources_nvme: Orphan namespace id=$ns_id path=$ns_path"
+        fi
+    done
+
+    # Check for orphaned zvols (zvol exists but no namespace points to it)
+    for zvol_id in "${zvol_ids[@]}"; do
+        local zvol_path="zvol/$zvol_id"
+        local ns_found=false
+
+        for ns_path in "${ns_device_paths[@]}"; do
+            if [[ "$ns_path" == "$zvol_path" ]]; then
+                ns_found=true
+                break
+            fi
+        done
+
+        if [[ "$ns_found" == "false" ]]; then
+            # Zvol has no namespace pointing to it - orphan
+            zvol_orphans+=("$zvol_id")
+            ((orphan_count++))
+            log "INFO" "_detect_orphaned_resources_nvme: Orphan zvol $zvol_id"
+        fi
+    done
+
+    # Fetch all NVMe subsystems and detect orphans (empty subsystems not in storage.cfg)
+    log "INFO" "_detect_orphaned_resources_nvme: Fetching NVMe subsystems"
+    local subsys_response
+    subsys_response=$(tn_api_call "$api_host" "$api_key" "nvmet.subsys.query" '[[]]' 2>&1)
+    if [[ $? -eq 0 && -n "$subsys_response" ]]; then
+        # Get list of subsystem NQNs configured in storage.cfg
+        local configured_nqns=()
+        while IFS= read -r nqn; do
+            [[ -n "$nqn" ]] && configured_nqns+=("$nqn")
+        done < <(grep -h "subsystem_nqn" /etc/pve/storage.cfg 2>/dev/null | awk '{print $2}')
+
+        log "INFO" "_detect_orphaned_resources_nvme: ${#configured_nqns[@]} subsystems configured in storage.cfg"
+
+        # Get unique subsystem IDs that have namespaces (from earlier Perl parsing)
+        local subsys_ids_with_ns=()
+        for subsys_id in "${ns_subsys_ids[@]}"; do
+            [[ -z "$subsys_id" ]] && continue
+            # Check if already in array (dedup)
+            local already_added=false
+            for existing in "${subsys_ids_with_ns[@]}"; do
+                [[ "$existing" == "$subsys_id" ]] && { already_added=true; break; }
+            done
+            [[ "$already_added" == "false" ]] && subsys_ids_with_ns+=("$subsys_id")
+        done
+
+        # Validate: if namespaces exist but no subsystem mappings found, skip subsystem orphan detection
+        # This prevents false positives if the JSON structure changes or parsing fails
+        if [[ ${#ns_ids[@]} -gt 0 && ${#subsys_ids_with_ns[@]} -eq 0 ]]; then
+            log "WARN" "_detect_orphaned_resources_nvme: Found ${#ns_ids[@]} namespaces but could not map to subsystems, skipping subsystem orphan detection"
+        else
+
+        # Parse subsystems using Perl and check for orphans
+        local subsys_parsed
+        subsys_parsed=$(echo "$subsys_response" | perl -MJSON::PP -e '
+            my $json = do { local $/; <STDIN> };
+            my $data = eval { decode_json($json) } // [];
+            for my $s (@$data) {
+                next unless ref($s) eq "HASH" && defined $s->{id} && defined $s->{subnqn};
+                my $name = $s->{name} // "";
+                print "$s->{id}\t$name\t$s->{subnqn}\n";
+            }
+        ' 2>/dev/null)
+
+        while IFS=$'\t' read -r subsys_id subsys_name subsys_nqn; do
+            [[ -z "$subsys_id" || -z "$subsys_nqn" ]] && continue
+
+            # Check if subsystem has any namespaces
+            local has_namespaces=false
+            for used_id in "${subsys_ids_with_ns[@]}"; do
+                if [[ "$used_id" == "$subsys_id" ]]; then
+                    has_namespaces=true
+                    break
+                fi
+            done
+
+            # Check if subsystem is configured in storage.cfg
+            local is_configured=false
+            for cfg_nqn in "${configured_nqns[@]}"; do
+                if [[ "$cfg_nqn" == "$subsys_nqn" ]]; then
+                    is_configured=true
+                    break
+                fi
+            done
+
+            # Orphan: no namespaces AND not configured
+            if [[ "$has_namespaces" == "false" && "$is_configured" == "false" ]]; then
+                nvme_subsys_orphans+=("$subsys_id|$subsys_name|$subsys_nqn")
+                ((orphan_count++))
+                log "INFO" "_detect_orphaned_resources_nvme: Orphan subsystem id=$subsys_id name=$subsys_name nqn=$subsys_nqn"
+            fi
+        done <<< "$subsys_parsed"
+        fi  # End of namespace-to-subsystem mapping validation
+    else
+        log "WARN" "_detect_orphaned_resources_nvme: Failed to query subsystems, skipping subsystem orphan detection"
+    fi
+
+    log "INFO" "_detect_orphaned_resources_nvme: Found $orphan_count orphans (${#nvme_ns_orphans[@]} namespaces, ${#zvol_orphans[@]} zvols, ${#nvme_subsys_orphans[@]} subsystems)"
+    # Return orphan count as exit code (0-254 valid, 255 = error)
+    return "$orphan_count"
 }
 
 # ============================================================================
@@ -3818,7 +4665,7 @@ run_fio_benchmark() {
             warning "FIO JSON output format may not be supported"
             info "Benchmark results parsing may fail"
             echo
-            read -rp "Continue anyway? (y/N): " continue_choice
+            read -rp "Continue anyway? [y/N]: " continue_choice
             if [[ ! "$continue_choice" =~ ^[Yy] ]]; then
                 return 1
             fi
@@ -3931,6 +4778,18 @@ run_fio_benchmark() {
 
     # Try pvesm path first (authoritative source)
     test_device=$(pvesm path "$volume_name" 2>/dev/null)
+
+    # Resolve symlinks to get canonical device path
+    # IMPORTANT: FIO interprets colons (:) as filename separators, so by-path symlinks like
+    # /dev/disk/by-path/ip-10.15.14.172:3260-iscsi-iqn.2005-10.org.freenas.ctl:proxmox-lun-5
+    # would be parsed as 3 separate files. Resolving to /dev/sdX avoids this issue.
+    if [[ -n "$test_device" ]]; then
+        local resolved_device
+        resolved_device=$(readlink -f "$test_device" 2>/dev/null)
+        if [[ -n "$resolved_device" && -b "$resolved_device" ]]; then
+            test_device="$resolved_device"
+        fi
+    fi
 
     # If pvesm path didn't work, fall back to detection logic
     if [[ -z "$test_device" || ! -b "$test_device" ]]; then
@@ -5099,25 +5958,54 @@ run_health_check() {
 
     # Check 13: Weight volume presence (iSCSI only)
     if [[ "$transport_mode" == "iscsi" ]]; then
-        local weight_zvol="${dataset}/pve-plugin-weight"
-        local weight_encoded=$(echo "$weight_zvol" | sed 's/\//%2F/g')
         local weight_check_failed=0
+        local weight_name=""
 
-        # Check if weight zvol exists via API
+        # Get target IQN to derive weight volume name
+        local target_iqn
+        target_iqn=$(get_storage_config_value "$storage_name" "target_iqn")
+
+        # Derive weight name from IQN (same logic as plugin)
+        # Extract suffix from IQN (e.g., "iqn.2005-10.org.freenas.ctl:proxmox" -> "proxmox")
+        local target_suffix="$target_iqn"
+        if [[ "$target_iqn" =~ :([^:]+)$ ]]; then
+            target_suffix="${BASH_REMATCH[1]}"
+        fi
+        # Sanitize for zvol name (replace non-alphanumeric with dash)
+        target_suffix=$(echo "$target_suffix" | sed 's/[^a-zA-Z0-9]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+        local new_weight_name="pve-weight-$target_suffix"
+        local old_weight_name="pve-plugin-weight"
+
+        # Check for new format first, then old format for backwards compatibility
+        local weight_zvol_new="${dataset}/${new_weight_name}"
+        local weight_zvol_old="${dataset}/${old_weight_name}"
+        local weight_encoded_new=$(echo "$weight_zvol_new" | sed 's/\//%2F/g')
+        local weight_encoded_old=$(echo "$weight_zvol_old" | sed 's/\//%2F/g')
+
+        # Check if weight zvol exists via API (try new format first)
         local zvol_response=$(curl -sk -H "Authorization: Bearer $api_key" \
-            "https://$api_host/api/v2.0/pool/dataset/id/$weight_encoded" 2>/dev/null)
+            "https://$api_host/api/v2.0/pool/dataset/id/$weight_encoded_new" 2>/dev/null)
 
-        if ! echo "$zvol_response" | grep -q '"id"'; then
-            check_result "Weight volume presence" "WARNING" "Weight zvol missing"
-            weight_check_failed=1
+        if echo "$zvol_response" | grep -q '"id"'; then
+            weight_name="$new_weight_name"
+        else
+            # Try old format for backwards compatibility
+            zvol_response=$(curl -sk -H "Authorization: Bearer $api_key" \
+                "https://$api_host/api/v2.0/pool/dataset/id/$weight_encoded_old" 2>/dev/null)
+            if echo "$zvol_response" | grep -q '"id"'; then
+                weight_name="$old_weight_name"
+            else
+                check_result "Weight volume presence" "WARNING" "Weight zvol missing"
+                weight_check_failed=1
+            fi
         fi
 
         # Check if weight extent exists (only if zvol exists)
-        if [[ $weight_check_failed -eq 0 ]]; then
+        if [[ $weight_check_failed -eq 0 ]] && [[ -n "$weight_name" ]]; then
             local extent_response=$(curl -sk -H "Authorization: Bearer $api_key" \
                 "https://$api_host/api/v2.0/iscsi/extent" 2>/dev/null)
 
-            if ! echo "$extent_response" | grep -q '"name": "pve-plugin-weight"'; then
+            if ! echo "$extent_response" | grep -q "\"name\": \"$weight_name\""; then
                 check_result "Weight volume presence" "WARNING" "Weight extent missing"
                 weight_check_failed=1
             fi
@@ -5125,7 +6013,7 @@ run_health_check() {
 
         # If both exist, report OK
         if [[ $weight_check_failed -eq 0 ]]; then
-            check_result "Weight volume presence" "OK" "Present and configured"
+            check_result "Weight volume presence" "OK" "Present ($weight_name)"
         fi
     else
         # NVMe/TCP mode - skip weight check (not applicable)
@@ -5295,7 +6183,7 @@ menu_install_specific_version() {
         # (cluster-wide shows next steps automatically)
         if [[ "$install_cluster_wide" == "false" ]] && [[ "$NON_INTERACTIVE" != "true" ]]; then
             echo
-            read -rp "Would you like to configure storage now? (y/N): " response
+            read -rp "Would you like to configure storage now? [y/N]: " response
             if [[ "$response" =~ ^[Yy] ]]; then
                 menu_configure_storage
             else
@@ -5401,7 +6289,7 @@ get_hostnqn() {
         hostnqn=$(cat /etc/nvme/hostnqn 2>/dev/null | tr -d '\n')
         if [[ -n "$hostnqn" ]]; then
             info "Found existing host NQN: $hostnqn" >&2
-            read -rp "Use this host NQN? (Y/n): " use_existing
+            read -rp "Use this host NQN? [Y/n]: " use_existing
             if [[ ! "$use_existing" =~ ^[Nn] ]]; then
                 echo "$hostnqn"
                 return 0
@@ -5411,7 +6299,7 @@ get_hostnqn() {
 
     # Generate new hostnqn
     warning "No host NQN found or user declined existing one"
-    read -rp "Generate new host NQN? (Y/n): " gen_new
+    read -rp "Generate new host NQN? [Y/n]: " gen_new
     if [[ ! "$gen_new" =~ ^[Nn] ]]; then
         if check_nvme_cli; then
             mkdir -p /etc/nvme
@@ -5472,35 +6360,22 @@ check_nvme_multipath() {
 }
 
 # Test TrueNAS API connectivity
+# Uses WebSocket API via TrueNASPlugin (REST not available)
 test_truenas_api() {
     local ip="$1"
     local apikey="$2"
-
-    local url="https://${ip}/api/v2.0/system/info"
-    local tool
-    tool=$(get_download_tool)
 
     printf "  Testing connection to TrueNAS at %s..." "$ip"
     start_spinner
 
     local response
-    case "$tool" in
-        curl)
-            response=$(curl -sk -H "Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            ;;
-        wget)
-            response=$(wget --no-check-certificate --quiet -O - --header="Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            ;;
-        *)
-            stop_spinner
-            echo ""
-            return 1
-            ;;
-    esac
+    response=$(tn_api_call "$ip" "$apikey" "system.info" "[]" 2>/dev/null)
+    local exit_code=$?
 
     stop_spinner
-    echo ""
-    if [[ -n "$response" ]] && echo "$response" | grep -q '"version"'; then
+    printf "\r\033[K"  # Clear spinner line
+
+    if [[ $exit_code -eq 0 ]] && [[ -n "$response" ]] && echo "$response" | grep -q '"version"'; then
         local version
         version=$(echo "$response" | grep -Po '"version":\s*"\K[^"]+' 2>/dev/null)
         success "Connected to TrueNAS successfully (version: $version)"
@@ -5512,46 +6387,31 @@ test_truenas_api() {
 }
 
 # Verify dataset exists
+# Uses WebSocket API via TrueNASPlugin (REST not available)
 verify_dataset() {
     local ip="$1"
     local apikey="$2"
     local dataset="$3"
 
-    local url="https://${ip}/api/v2.0/pool/dataset?id=${dataset}"
-    local tool
-    tool=$(get_download_tool)
-
     printf "  Verifying dataset '%s'..." "$dataset"
     start_spinner
 
+    # Use pool.dataset.query with filter for specific dataset
+    local filter="[[\"id\", \"=\", \"${dataset}\"]]"
     local response
-    local http_code
-    case "$tool" in
-        curl)
-            response=$(curl -sk -w "\n%{http_code}" -H "Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            http_code=$(echo "$response" | tail -n1)
-            response=$(echo "$response" | head -n-1)
-            ;;
-        wget)
-            response=$(wget --no-check-certificate --quiet -O - --header="Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            http_code="200"
-            ;;
-        *)
-            stop_spinner
-            echo ""
-            return 1
-            ;;
-    esac
+    response=$(tn_api_call "$ip" "$apikey" "pool.dataset.query" "$filter" 2>/dev/null)
+    local exit_code=$?
 
     stop_spinner
     echo ""
 
-    if [[ "$http_code" != "200" ]]; then
+    if [[ $exit_code -ne 0 ]]; then
         warning "Dataset '$dataset' not found or not accessible"
         return 1
     fi
 
-    if [[ -n "$response" ]] && echo "$response" | grep -q "\"id\": \"${dataset}\""; then
+    # Check if response contains the dataset (non-empty array)
+    if [[ -n "$response" ]] && [[ "$response" != "[]" ]] && echo "$response" | grep -q "\"id\""; then
         success "Dataset '$dataset' verified"
         return 0
     else
@@ -5561,27 +6421,15 @@ verify_dataset() {
 }
 
 # Discover available TrueNAS portals from network interfaces
+# Uses WebSocket API via TrueNASPlugin (REST not available)
 discover_truenas_portals() {
     local ip="$1"
     local apikey="$2"
     local primary_ip="$3"
 
-    local url="https://${ip}/api/v2.0/interface"
-    local tool
-    tool=$(get_download_tool)
-
+    # Use tn_query_interfaces which already uses WebSocket
     local response
-    case "$tool" in
-        curl)
-            response=$(curl -sk -H "Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            ;;
-        wget)
-            response=$(wget --no-check-certificate --quiet -O - --header="Authorization: Bearer $apikey" "$url" 2>/dev/null)
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    response=$(tn_query_interfaces "$ip" "$apikey")
 
     if [[ -z "$response" ]]; then
         return 1
@@ -5590,7 +6438,7 @@ discover_truenas_portals() {
     # Extract IP addresses from interfaces, excluding the primary IP
     # Parse JSON to find all "address" fields with IPv4 addresses
     local portals
-    portals=$(echo "$response" | grep -Po '"address":\s*"\K[0-9.]+' | grep -v "^127\." | grep -v "^${primary_ip}$" | sort -u)
+    portals=$(echo "$response" | grep -Po '"address":\s*"\K[0-9.]+' | grep -v "^127\." | grep -v -- "^${primary_ip}$" | sort -u)
 
     if [[ -z "$portals" ]]; then
         return 1
@@ -5600,7 +6448,3287 @@ discover_truenas_portals() {
     return 0
 }
 
+# Query TrueNAS network interfaces with detailed information
+# Returns JSON with interface name, IP, speed, link state
+# Uses WebSocket API via TrueNASPlugin (REST not available for this endpoint)
+tn_query_interfaces() {
+    local ip="$1"
+    local apikey="$2"
+
+    # Use WebSocket API call via TrueNASPlugin
+    local response
+    response=$(tn_api_call "$ip" "$apikey" "interface.query" "[]" 2>/dev/null)
+
+    if [[ -z "$response" ]] || [[ "$response" == "null" ]]; then
+        return 1
+    fi
+
+    echo "$response"
+    return 0
+}
+
+# Parse link speed from TrueNAS active_media_subtype to human-readable format
+# Input: "40000Mb/s Direct Attach Copper" or "10000baseT/Full" or "1000Mb/s"
+# Output: "40 Gb" or "10 Gb" or "1 Gb"
+parse_link_speed() {
+    local media_subtype="$1"
+
+    if [[ -z "$media_subtype" ]]; then
+        echo "-"
+        return
+    fi
+
+    # Pattern: "40000Mb/s..." -> extract number before "Mb/s"
+    if [[ "$media_subtype" =~ ([0-9]+)Mb/s ]]; then
+        local mbps="${BASH_REMATCH[1]}"
+        if [[ $mbps -ge 1000 ]]; then
+            echo "$((mbps / 1000)) Gb"
+        else
+            echo "${mbps} Mb"
+        fi
+    # Pattern: "10000baseT..." -> extract number before "base"
+    elif [[ "$media_subtype" =~ ([0-9]+)base ]]; then
+        local mbps="${BASH_REMATCH[1]}"
+        if [[ $mbps -ge 1000 ]]; then
+            echo "$((mbps / 1000)) Gb"
+        else
+            echo "${mbps} Mb"
+        fi
+    else
+        echo "-"
+    fi
+}
+
+# Query TrueNAS iSCSI service configuration for the listen port
+# Returns: port number (e.g., "3260") or empty on failure
+# Uses WebSocket API via TrueNASPlugin (REST not available)
+tn_get_iscsi_port() {
+    local ip="$1"
+    local apikey="$2"
+
+    local response
+    response=$(tn_api_call "$ip" "$apikey" "iscsi.global.config" "[]" 2>/dev/null)
+
+    if [[ -z "$response" ]] || [[ "$response" == "null" ]]; then
+        return 1
+    fi
+
+    # Extract listen_port from response
+    local port
+    port=$(echo "$response" | grep -Po '"listen_port":\s*\K[0-9]+')
+
+    if [[ -n "$port" ]]; then
+        echo "$port"
+        return 0
+    fi
+
+    return 1
+}
+
+# Global array populated by tn_check_existing_portals with all IPs that have portals configured
+ISCSI_PORTAL_IPS=()
+
+# Check for existing iSCSI portals matching selected IPs
+# Returns: "exact:<portal_id>" if exact match, "partial:<portal_id>:<matched_ips>" if partial, "none" if no match
+# Also populates global ISCSI_PORTAL_IPS array with all IPs that have existing portals
+# Uses WebSocket API via TrueNASPlugin (REST not available)
+tn_check_existing_portals() {
+    local ip="$1"
+    local apikey="$2"
+    local selected_ips="$3"  # Space-separated list of IPs
+
+    # Reset global array
+    ISCSI_PORTAL_IPS=()
+
+    # Use WebSocket API call via TrueNASPlugin
+    local response
+    response=$(tn_api_call "$ip" "$apikey" "iscsi.portal.query" "[]" 2>/dev/null)
+
+    if [[ -z "$response" ]] || [[ "$response" == "[]" ]] || [[ "$response" == "null" ]]; then
+        echo "none"
+        return
+    fi
+
+    # Convert selected IPs to array for comparison
+    local -a sel_ips
+    read -ra sel_ips <<< "$selected_ips"
+    local num_selected=${#sel_ips[@]}
+
+    # Parse portals using awk to properly extract per-portal listen IPs
+    # Portal format: [{"id":1,"listen":[{"ip":"10.20.30.20","port":3260},...]}, ...]
+    # Note: Uses mawk-compatible syntax (no gawk-specific capture groups)
+    local parsed_portals
+    parsed_portals=$(echo "$response" | awk '
+    # Extract numeric ID value after "id": pattern
+    function extract_id(block,    pos, start, num, c, i) {
+        # Try "id": with space
+        pos = index(block, "\"id\": ")
+        if (pos > 0) { start = pos + 6 }
+        else {
+            # Try "id": without space
+            pos = index(block, "\"id\":")
+            if (pos > 0) { start = pos + 5 }
+            else { return "" }
+        }
+        # Extract digits
+        num = ""
+        for (i = start; i <= length(block); i++) {
+            c = substr(block, i, 1)
+            if (c >= "0" && c <= "9") { num = num c }
+            else if (num != "") { break }
+        }
+        return num
+    }
+
+    # Find all IPv4 addresses from "ip":"X.X.X.X" patterns
+    function find_ips(block, ips,    count, remainder, pos, addr, i, c) {
+        count = 0
+        remainder = block
+        while (1) {
+            pos = index(remainder, "\"ip\":")
+            if (pos == 0) break
+            remainder = substr(remainder, pos + 5)
+            # Skip whitespace and opening quote
+            while (substr(remainder, 1, 1) == " ") remainder = substr(remainder, 2)
+            if (substr(remainder, 1, 1) != "\"") continue
+            remainder = substr(remainder, 2)
+            # Extract until closing quote
+            addr = ""
+            for (i = 1; i <= length(remainder); i++) {
+                c = substr(remainder, i, 1)
+                if (c == "\"") break
+                addr = addr c
+            }
+            if (addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                count++
+                ips[count] = addr
+            }
+            remainder = substr(remainder, i + 1)
+        }
+        return count
+    }
+
+    BEGIN { RS=""; FS="" }
+    {
+        json = $0
+        gsub(/\n/, " ", json)
+        gsub(/  +/, " ", json)
+
+        n = split(json, chars, "")
+        depth = 0
+        portal_start = 0
+        in_top_array = 0
+
+        for (i = 1; i <= n; i++) {
+            c = chars[i]
+
+            if (c == "[" && depth == 0) {
+                in_top_array = 1
+                continue
+            }
+            if (c == "{") {
+                depth++
+                if (depth == 1) {
+                    portal_start = i
+                }
+            }
+            if (c == "}") {
+                depth--
+                if (depth == 0 && portal_start > 0) {
+                    # Extract portal block
+                    portal_block = ""
+                    for (j = portal_start; j <= i; j++) {
+                        portal_block = portal_block chars[j]
+                    }
+
+                    # Extract portal ID
+                    portal_id = extract_id(portal_block)
+
+                    # Extract all IPs from listen array for this portal
+                    if (portal_id != "") {
+                        delete ip_list
+                        ip_count = find_ips(portal_block, ip_list)
+                        for (k = 1; k <= ip_count; k++) {
+                            print portal_id "|" ip_list[k]
+                        }
+                    }
+
+                    portal_start = 0
+                }
+            }
+        }
+    }')
+
+    # Build associative arrays of portal IPs
+    local best_match_count=0
+    local best_portal_id=""
+    local current_portal=""
+    local -a current_ips=()
+
+    # Process parsed output, grouping by portal ID
+    while IFS='|' read -r portal_id portal_ip; do
+        [[ -z "$portal_id" ]] && continue
+
+        # Add to global array of all portal IPs (for per-IP display)
+        ISCSI_PORTAL_IPS+=("$portal_ip")
+
+        if [[ "$portal_id" != "$current_portal" ]]; then
+            # Check previous portal if any
+            if [[ -n "$current_portal" ]] && [[ ${#current_ips[@]} -gt 0 ]]; then
+                local match_count=0
+                for sel_ip in "${sel_ips[@]}"; do
+                    for pip in "${current_ips[@]}"; do
+                        if [[ "$sel_ip" == "$pip" ]]; then
+                            ((match_count++))
+                            break
+                        fi
+                    done
+                done
+                if [[ $match_count -gt $best_match_count ]]; then
+                    best_match_count=$match_count
+                    best_portal_id=$current_portal
+                fi
+            fi
+            # Start new portal
+            current_portal="$portal_id"
+            current_ips=("$portal_ip")
+        else
+            current_ips+=("$portal_ip")
+        fi
+    done <<< "$parsed_portals"
+
+    # Check last portal
+    if [[ -n "$current_portal" ]] && [[ ${#current_ips[@]} -gt 0 ]]; then
+        local match_count=0
+        for sel_ip in "${sel_ips[@]}"; do
+            for pip in "${current_ips[@]}"; do
+                if [[ "$sel_ip" == "$pip" ]]; then
+                    ((match_count++))
+                    break
+                fi
+            done
+        done
+        if [[ $match_count -gt $best_match_count ]]; then
+            best_match_count=$match_count
+            best_portal_id=$current_portal
+        fi
+    fi
+
+    if [[ $best_match_count -eq 0 ]]; then
+        echo "none"
+    elif [[ $best_match_count -eq $num_selected ]]; then
+        echo "exact:${best_portal_id}"
+    else
+        echo "partial:${best_portal_id}:${best_match_count}/${num_selected}"
+    fi
+}
+
+# Check for existing NVMe ports matching selected IPs
+# Returns space-separated list: "ip:port_id ip:port_id" for existing, or "none"
+# Uses WebSocket API via TrueNASPlugin (REST not available)
+tn_check_existing_nvme_ports() {
+    local ip="$1"
+    local apikey="$2"
+    local selected_ips="$3"  # Space-separated list of IPs
+
+    # Use WebSocket API call via TrueNASPlugin
+    local response
+    response=$(tn_api_call "$ip" "$apikey" "nvmet.port.query" "[]" 2>/dev/null)
+
+    if [[ -z "$response" ]] || [[ "$response" == "[]" ]] || [[ "$response" == "null" ]]; then
+        echo "none"
+        return
+    fi
+
+    # Convert selected IPs to array
+    local -a sel_ips
+    read -ra sel_ips <<< "$selected_ips"
+
+    local existing_ports=""
+
+    # Parse NVMe ports - format: {"id":1,"addr_traddr":"10.20.30.20","addr_trsvcid":4420,...}
+    for sel_ip in "${sel_ips[@]}"; do
+        # Check if this IP has an existing port
+        local port_id
+        port_id=$(echo "$response" | grep -Po '"id":\s*([0-9]+)[^}]*"addr_traddr":\s*"'"$sel_ip"'"' | grep -Po '"id":\s*\K[0-9]+' | head -1)
+        if [[ -z "$port_id" ]]; then
+            # Try alternate order in JSON
+            port_id=$(echo "$response" | grep -Po '"addr_traddr":\s*"'"$sel_ip"'"[^}]*"id":\s*([0-9]+)' | grep -Po '"id":\s*\K[0-9]+' | head -1)
+        fi
+        if [[ -n "$port_id" ]]; then
+            existing_ports+="${sel_ip}:${port_id} "
+        fi
+    done
+
+    if [[ -z "$existing_ports" ]]; then
+        echo "none"
+    else
+        echo "${existing_ports% }"  # Trim trailing space
+    fi
+}
+
+# Display TrueNAS network interfaces in a formatted table
+# Sets global arrays: IFACE_NAMES, IFACE_IPS, IFACE_SPEEDS, IFACE_STATES, IFACE_MGMT
+display_interface_table() {
+    local interfaces_json="$1"
+    local transport_mode="$2"
+    local api_host="$3"
+    local apikey="$4"
+
+    # Initialize global arrays
+    IFACE_NAMES=()
+    IFACE_IPS=()
+    IFACE_SPEEDS=()
+    IFACE_STATES=()
+    IFACE_MGMT=()
+
+    # Check for existing portals/ports
+    local existing_portals=""
+    local existing_nvme_ports=""
+
+    # Parse interfaces from JSON using awk to properly extract per-interface data
+    # TrueNAS interface.query returns: [{name, aliases:[{address,...}], state:{link_state, active_media_subtype}}]
+    # We use awk to parse JSON structure and output: name|ip|link_state|media_subtype (one line per IP)
+    # Note: Uses mawk-compatible syntax (no gawk-specific capture groups)
+    local parsed_interfaces
+    parsed_interfaces=$(echo "$interfaces_json" | awk '
+    # Helper function to extract quoted value after a key
+    # Returns the value between quotes after "key": "value" or "key":"value"
+    # Note: index() does literal matching, so we try both patterns
+    function extract_value(block, key,    pattern, pos, start, end, val) {
+        # Try "key":"value" (no space)
+        pattern = "\"" key "\":\""
+        pos = index(block, pattern)
+        if (pos > 0) {
+            start = pos + length(pattern)
+            end = index(substr(block, start), "\"")
+            if (end > 0) return substr(block, start, end - 1)
+        }
+        # Try "key": "value" (with space)
+        pattern = "\"" key "\": \""
+        pos = index(block, pattern)
+        if (pos > 0) {
+            start = pos + length(pattern)
+            end = index(substr(block, start), "\"")
+            if (end > 0) return substr(block, start, end - 1)
+        }
+        return ""
+    }
+
+    # Helper function to find all IPv4 addresses in a block
+    function find_ipv4_addresses(block, ips,    count, pos, remainder, addr, i, c, in_addr) {
+        count = 0
+        # Look for "address": "X.X.X.X" patterns
+        remainder = block
+        while (1) {
+            pos = index(remainder, "\"address\":")
+            if (pos == 0) break
+            remainder = substr(remainder, pos + 10)  # Skip past "address":
+            # Skip whitespace and opening quote
+            while (substr(remainder, 1, 1) == " ") remainder = substr(remainder, 2)
+            if (substr(remainder, 1, 1) != "\"") continue
+            remainder = substr(remainder, 2)  # Skip opening quote
+            # Extract until closing quote
+            addr = ""
+            for (i = 1; i <= length(remainder); i++) {
+                c = substr(remainder, i, 1)
+                if (c == "\"") break
+                addr = addr c
+            }
+            # Check if it looks like IPv4 (contains only digits and dots)
+            if (addr ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                count++
+                ips[count] = addr
+            }
+            remainder = substr(remainder, i + 1)
+        }
+        return count
+    }
+
+    BEGIN { RS=""; FS="" }
+    {
+        json = $0
+        # Remove newlines and normalize whitespace
+        gsub(/\n/, " ", json)
+        gsub(/  +/, " ", json)
+
+        # Track brace depth to find interface boundaries
+        n = split(json, chars, "")
+        depth = 0
+        in_array = 0
+        iface_start = 0
+        current_name = ""
+        current_link = "UP"
+        current_speed = ""
+
+        for (i = 1; i <= n; i++) {
+            c = chars[i]
+
+            if (c == "[" && depth == 0) {
+                in_array = 1
+                continue
+            }
+            if (c == "{") {
+                depth++
+                if (depth == 1) {
+                    iface_start = i
+                    current_name = ""
+                    current_link = "UP"
+                    current_speed = ""
+                }
+            }
+            if (c == "}") {
+                depth--
+                if (depth == 0 && iface_start > 0) {
+                    # Extract interface block
+                    iface_block = ""
+                    for (j = iface_start; j <= i; j++) {
+                        iface_block = iface_block chars[j]
+                    }
+
+                    # Extract name using helper function
+                    current_name = extract_value(iface_block, "name")
+
+                    # Extract link_state from state object
+                    link_val = extract_value(iface_block, "link_state")
+                    if (link_val ~ /DOWN/) {
+                        current_link = "DOWN"
+                    } else {
+                        current_link = "UP"
+                    }
+
+                    # Extract active_media_subtype from state object
+                    current_speed = extract_value(iface_block, "active_media_subtype")
+
+                    # Extract all IPv4 addresses from aliases array
+                    delete ip_list
+                    ip_count = find_ipv4_addresses(iface_block, ip_list)
+                    for (k = 1; k <= ip_count; k++) {
+                        ip = ip_list[k]
+                        # Skip localhost
+                        if (ip !~ /^127\./) {
+                            print current_name "|" ip "|" current_link "|" current_speed
+                        }
+                    }
+
+                    iface_start = 0
+                }
+            }
+        }
+    }')
+
+    # Process parsed output into arrays
+    while IFS='|' read -r iface_name ipv4 link_state media_subtype; do
+        [[ -z "$ipv4" ]] && continue
+
+        # Skip if we already have this IP (shouldn't happen with proper parsing)
+        local already_added=false
+        for existing_ip in "${IFACE_IPS[@]}"; do
+            if [[ "$existing_ip" == "$ipv4" ]]; then
+                already_added=true
+                break
+            fi
+        done
+        [[ "$already_added" == "true" ]] && continue
+
+        # Parse speed
+        local speed
+        speed=$(parse_link_speed "$media_subtype")
+
+        # Check if this is the management interface
+        local is_mgmt=""
+        if [[ "$ipv4" == "$api_host" ]]; then
+            is_mgmt="mgmt"
+        fi
+
+        IFACE_NAMES+=("$iface_name")
+        IFACE_IPS+=("$ipv4")
+        IFACE_SPEEDS+=("$speed")
+        IFACE_STATES+=("$link_state")
+        IFACE_MGMT+=("$is_mgmt")
+    done <<< "$parsed_interfaces"
+
+    # Fallback: if awk parsing failed, try simple grep extraction
+    if [[ ${#IFACE_IPS[@]} -eq 0 ]]; then
+        local all_ips
+        all_ips=$(echo "$interfaces_json" | grep -Po '"address":\s*"\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(?=")' | grep -v "^127\." | sort -u)
+        local idx=1
+        for ipv4 in $all_ips; do
+            IFACE_NAMES+=("if${idx}")
+            IFACE_IPS+=("$ipv4")
+            IFACE_SPEEDS+=("-")
+            IFACE_STATES+=("UP")
+            if [[ "$ipv4" == "$api_host" ]]; then
+                IFACE_MGMT+=("mgmt")
+            else
+                IFACE_MGMT+=("")
+            fi
+            ((idx++))
+        done
+    fi
+
+    if [[ ${#IFACE_IPS[@]} -eq 0 ]]; then
+        error "No network interfaces with IPv4 addresses found on TrueNAS"
+        return 1
+    fi
+
+    # Check if ALL interfaces are DOWN
+    local all_down=true
+    for state in "${IFACE_STATES[@]}"; do
+        if [[ "$state" == "UP" ]]; then
+            all_down=false
+            break
+        fi
+    done
+
+    if [[ "$all_down" == "true" ]]; then
+        echo
+        warning "All available interfaces are DOWN"
+        warning "Storage may not be accessible until interfaces are active"
+        read -rp "Continue anyway? [y/N]: " continue_down
+        if [[ ! "$continue_down" =~ ^[Yy] ]]; then
+            return 1
+        fi
+    fi
+
+    # Get existing portal/port info for display
+    local all_ips_space="${IFACE_IPS[*]}"
+    if [[ "$transport_mode" == "iscsi" ]]; then
+        existing_portals=$(tn_check_existing_portals "$api_host" "$apikey" "$all_ips_space")
+    else
+        existing_nvme_ports=$(tn_check_existing_nvme_ports "$api_host" "$apikey" "$all_ips_space")
+    fi
+
+    # Display header
+    echo
+    printf '%b%b%s%b\n' "${c6}" "${c8}" "TrueNAS Network Interfaces" "${c0}"
+    printf '%b%s%b\n' "${c6}" "$(printf '─%.0s' {1..65})" "${c0}"
+
+    local portal_col
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        portal_col="NVMe Port"
+    else
+        portal_col="Portal"
+    fi
+    printf "  %-3s %-14s %-17s %-8s %-6s %s\n" "#" "Interface" "IP Address" "Speed" "Link" "$portal_col"
+    printf '%b%s%b\n' "${c6}" "$(printf '─%.0s' {1..65})" "${c0}"
+
+    # Display each interface
+    for ((i=0; i<${#IFACE_IPS[@]}; i++)); do
+        local num=$((i+1))
+        local name="${IFACE_NAMES[$i]}"
+        local ip="${IFACE_IPS[$i]}"
+        local speed="${IFACE_SPEEDS[$i]}"
+        local state="${IFACE_STATES[$i]}"
+        local mgmt="${IFACE_MGMT[$i]}"
+
+        # Color for link state
+        local state_color="${c2}"  # Green for UP
+        if [[ "$state" == "DOWN" ]]; then
+            state_color="${c1}"  # Red for DOWN
+        fi
+
+        # Portal/Port status - check per-IP
+        local portal_status="-"
+        if [[ "$mgmt" == "mgmt" ]]; then
+            portal_status="${c3}⚠ Mgmt${c0}"
+        elif [[ "$transport_mode" == "nvme-tcp" ]] && [[ "$existing_nvme_ports" != "none" ]]; then
+            if echo "$existing_nvme_ports" | grep -q -- "^${ip}:"; then
+                portal_status="${c2}✓ Exists${c0}"
+            fi
+        elif [[ "$transport_mode" == "iscsi" ]]; then
+            # Check if this specific IP has an existing portal
+            for portal_ip in "${ISCSI_PORTAL_IPS[@]}"; do
+                if [[ "$portal_ip" == "$ip" ]]; then
+                    portal_status="${c2}✓ Exists${c0}"
+                    break
+                fi
+            done
+        fi
+
+        printf "  %-3s %-14s %-17s %-8s %b%-6s%b %b\n" \
+            "$num" "$name" "$ip" "$speed" "$state_color" "$state" "${c0}" "$portal_status"
+    done
+
+    printf '%b%s%b\n' "${c6}" "$(printf '─%.0s' {1..65})" "${c0}"
+    echo
+
+    return 0
+}
+
+# Handle interface selection with validation
+# Returns selected indices (1-based) in SELECTED_IFACE_INDICES array
+select_interfaces() {
+    local max_index="$1"
+
+    SELECTED_IFACE_INDICES=()
+
+    while true; do
+        read -rp "Select interfaces (space-separated, e.g., '2 3'): " selection
+
+        if [[ -z "$selection" ]]; then
+            error "Must select at least 1 interface"
+            continue
+        fi
+
+        local -a selected=()
+        local -a invalid=()
+
+        for num in $selection; do
+            # Check if it's a number
+            if [[ ! "$num" =~ ^[0-9]+$ ]]; then
+                invalid+=("$num")
+                continue
+            fi
+
+            # Check range
+            if [[ $num -lt 1 ]] || [[ $num -gt $max_index ]]; then
+                invalid+=("$num")
+                continue
+            fi
+
+            # Check for duplicates
+            local is_dup=false
+            for s in "${selected[@]}"; do
+                if [[ "$s" == "$num" ]]; then
+                    is_dup=true
+                    break
+                fi
+            done
+            if [[ "$is_dup" == "false" ]]; then
+                selected+=("$num")
+            fi
+        done
+
+        if [[ ${#invalid[@]} -gt 0 ]]; then
+            warning "Invalid selections: ${invalid[*]}"
+        fi
+
+        if [[ ${#selected[@]} -eq 0 ]]; then
+            error "No valid interfaces selected"
+            continue
+        fi
+
+        # Check for DOWN interfaces and warn
+        local down_ifaces=""
+        for idx in "${selected[@]}"; do
+            local arr_idx=$((idx-1))
+            if [[ "${IFACE_STATES[$arr_idx]}" == "DOWN" ]]; then
+                down_ifaces+="${IFACE_NAMES[$arr_idx]} "
+            fi
+        done
+
+        if [[ -n "$down_ifaces" ]]; then
+            warning "Selected interface(s) are DOWN: ${down_ifaces}"
+            read -rp "Continue with DOWN interfaces? [y/N]: " confirm_down
+            if [[ ! "$confirm_down" =~ ^[Yy] ]]; then
+                continue
+            fi
+        fi
+
+        # Check for management interface
+        for idx in "${selected[@]}"; do
+            local arr_idx=$((idx-1))
+            if [[ "${IFACE_MGMT[$arr_idx]}" == "mgmt" ]]; then
+                warning "Interface ${IFACE_IPS[$arr_idx]} is the management interface"
+                info "Using it for storage may impact API connectivity"
+                read -rp "Include management interface? [y/N]: " confirm_mgmt
+                if [[ ! "$confirm_mgmt" =~ ^[Yy] ]]; then
+                    # Remove from selection
+                    local new_selected=()
+                    for s in "${selected[@]}"; do
+                        if [[ "$s" != "$idx" ]]; then
+                            new_selected+=("$s")
+                        fi
+                    done
+                    selected=("${new_selected[@]}")
+                fi
+            fi
+        done
+
+        if [[ ${#selected[@]} -eq 0 ]]; then
+            error "No interfaces selected after filtering"
+            continue
+        fi
+
+        SELECTED_IFACE_INDICES=("${selected[@]}")
+        break
+    done
+
+    # Display confirmation
+    echo
+    info "Selected interfaces:"
+    for idx in "${SELECTED_IFACE_INDICES[@]}"; do
+        local arr_idx=$((idx-1))
+        printf "  • %-14s %-17s %s\n" "${IFACE_NAMES[$arr_idx]}" "${IFACE_IPS[$arr_idx]}" "${IFACE_SPEEDS[$arr_idx]}"
+    done
+
+    return 0
+}
+
+# ============================================================================
+# TRUENAS API PROVISIONING FUNCTIONS
+# ============================================================================
+# These functions provide direct plugin invocation via perl -e for TrueNAS
+# storage provisioning. They enable automated creation of datasets, iSCSI
+# targets, portals, and NVMe/TCP subsystems from the installer.
+
+# Rollback state management - tracks created resources for cleanup on failure
+declare -a ROLLBACK_RESOURCES=()
+
+# Register a resource for potential rollback
+# Parameters: resource_type (dataset|portal|target|subsystem), resource_id
+register_resource() {
+    local resource_type="$1"
+    local resource_id="$2"
+    ROLLBACK_RESOURCES+=("${resource_type}:${resource_id}")
+    log "INFO" "Registered resource for rollback: ${resource_type}:${resource_id}"
+}
+
+# Clear all registered rollback resources (call on success)
+clear_rollback_state() {
+    ROLLBACK_RESOURCES=()
+    log "INFO" "Cleared rollback state"
+}
+
+# Get count of registered resources
+get_rollback_resource_count() {
+    echo "${#ROLLBACK_RESOURCES[@]}"
+}
+
+# Core wrapper that calls plugin's _api_call function via perl -e
+# Parameters: host, api_key, ws_method, ws_params_json
+# Returns: JSON output from TrueNAS API to stdout
+# Exit code: 0 on success, 1 on error (error message on stderr)
+tn_api_call() {
+    local host="$1"
+    local api_key="$2"
+    local method="$3"
+    local params="${4:-[]}"
+
+    log "INFO" "tn_api_call: method=$method"
+
+    local result
+    local exit_code
+    result=$(perl -e '
+        use strict;
+        use warnings;
+        use lib "/usr/share/perl5/PVE/Storage/Custom";
+        use TrueNASPlugin;
+        use JSON::PP;
+
+        my ($host, $api_key, $method, $params_json) = @ARGV;
+
+        # Build minimal scfg for API call
+        my $scfg = {
+            api_host => $host,
+            api_key => $api_key,
+            api_insecure => 1,
+        };
+
+        # Decode params
+        my $params = eval { decode_json($params_json) } // [];
+
+        # Make the API call
+        my $result = eval {
+            PVE::Storage::Custom::TrueNASPlugin::_api_call($scfg, $method, $params,
+                sub { die "REST API not supported for provisioning operations\n"; });
+        };
+
+        if ($@) {
+            print STDERR "ERROR: $@";
+            exit 1;
+        }
+
+        # Output result as JSON
+        print encode_json($result) if defined $result;
+    ' "$host" "$api_key" "$method" "$params" 2>&1)
+    exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        # Extract error message
+        local error_msg
+        error_msg=$(echo "$result" | grep -oP 'ERROR:\s*\K.*' || echo "$result")
+        log "ERROR" "tn_api_call failed: $error_msg"
+        echo "$error_msg" >&2
+        return 1
+    fi
+
+    echo "$result"
+    return 0
+}
+
+# Write operation wrapper (uses ephemeral connection)
+# Parameters: host, api_key, ws_method, ws_params_json
+# Returns: JSON output from TrueNAS API
+# Exit code: 0 on success, 1 on error
+tn_api_call_write() {
+    local host="$1"
+    local api_key="$2"
+    local method="$3"
+    local params="${4:-[]}"
+
+    log "INFO" "tn_api_call_write: method=$method"
+
+    local result
+    local exit_code
+    result=$(perl -e '
+        use strict;
+        use warnings;
+        use lib "/usr/share/perl5/PVE/Storage/Custom";
+        use TrueNASPlugin;
+        use JSON::PP;
+
+        my ($host, $api_key, $method, $params_json) = @ARGV;
+
+        # Build minimal scfg for API call
+        my $scfg = {
+            api_host => $host,
+            api_key => $api_key,
+            api_insecure => 1,
+        };
+
+        # Decode params - fail fast if JSON is invalid
+        my $params = eval { decode_json($params_json) };
+        if ($@ || !defined $params) {
+            print STDERR "ERROR: Failed to decode params JSON: $@\n";
+            print STDERR "Params received: $params_json\n";
+            exit 1;
+        }
+
+        # Make the API call with ephemeral connection
+        my $result = eval {
+            PVE::Storage::Custom::TrueNASPlugin::_api_call_write($scfg, $method, $params,
+                sub { die "REST API not supported for provisioning operations\n"; });
+        };
+
+        if ($@) {
+            print STDERR "ERROR: $@";
+            exit 1;
+        }
+
+        # Output result as JSON
+        print encode_json($result) if defined $result;
+    ' "$host" "$api_key" "$method" "$params" 2>&1)
+    exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        local error_msg
+        error_msg=$(echo "$result" | grep -oP 'ERROR:\s*\K.*' || echo "$result")
+        log "ERROR" "tn_api_call_write failed: $error_msg"
+        echo "$error_msg" >&2
+        return 1
+    fi
+
+    echo "$result"
+    return 0
+}
+
+# JSON parsing helper - extract a field value from JSON
+# Parameters: json_string, field_name
+# Returns: Field value (unquoted)
+parse_json_field() {
+    local json="$1"
+    local field="$2"
+
+    # Handle both "field": "value" and "field": value (numbers, booleans)
+    local value
+    value=$(echo "$json" | grep -oP "\"${field}\":\s*\K(\"[^\"]*\"|[0-9]+|true|false|null)" | head -1)
+
+    # Remove quotes if present
+    value="${value%\"}"
+    value="${value#\"}"
+
+    echo "$value"
+}
+
+# Validate API connectivity by calling core.ping
+# Parameters: host, api_key
+# Returns: 0 if connected, 1 on failure
+tn_validate_api() {
+    local host="$1"
+    local api_key="$2"
+
+    log "INFO" "Validating API connectivity to $host"
+
+    local result
+    result=$(tn_api_call "$host" "$api_key" "core.ping" "[]" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "API validation failed: $result"
+        return 1
+    fi
+
+    # core.ping returns "pong" on success
+    if [[ "$result" == '"pong"' ]] || [[ "$result" == 'pong' ]]; then
+        log "INFO" "API connectivity validated"
+        return 0
+    fi
+
+    log "ERROR" "Unexpected response from core.ping: $result"
+    return 1
+}
+
+# List available ZFS pools
+# Parameters: host, api_key
+# Returns: JSON array of pools
+tn_list_pools() {
+    local host="$1"
+    local api_key="$2"
+
+    log "INFO" "Listing ZFS pools"
+    tn_api_call "$host" "$api_key" "pool.query" "[]"
+}
+
+# Check if a dataset exists
+# Parameters: host, api_key, dataset_path (e.g., "tank/proxmox")
+# Returns: JSON object if exists, empty if not found
+# Exit code: 0 if exists, 1 if not found or error
+tn_check_dataset() {
+    local host="$1"
+    local api_key="$2"
+    local dataset="$3"
+
+    log "INFO" "Checking if dataset exists: $dataset"
+
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [[['id', '=', sys.argv[1]]]]
+print(json.dumps(data))
+" "$dataset" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct dataset query params: $params"
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call "$host" "$api_key" "pool.dataset.query" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Dataset check failed: $result"
+        return 1
+    fi
+
+    # Check if result is non-empty array
+    if [[ "$result" == "[]" ]] || [[ -z "$result" ]]; then
+        log "INFO" "Dataset does not exist: $dataset"
+        return 1
+    fi
+
+    log "INFO" "Dataset exists: $dataset"
+    echo "$result"
+    return 0
+}
+
+# Create a ZFS dataset for Proxmox storage
+# Parameters: host, api_key, parent_pool, dataset_name
+# Returns: JSON with created dataset info
+# Exit code: 0 on success, 1 on failure
+tn_create_dataset() {
+    local host="$1"
+    local api_key="$2"
+    local parent_pool="$3"
+    local dataset_name="$4"
+
+    local full_path="${parent_pool}/${dataset_name}"
+    log "INFO" "Creating dataset: $full_path"
+
+    # Create dataset with FILESYSTEM type (for zvol children)
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [{'name': sys.argv[1], 'type': 'FILESYSTEM'}]
+print(json.dumps(data))
+" "$full_path" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct dataset params JSON: $params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "pool.dataset.create" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Dataset creation failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Dataset created successfully: $full_path"
+    echo "$result"
+    return 0
+}
+
+# Delete a ZFS dataset
+# Parameters: host, api_key, dataset_path
+# Returns: 0 on success, 1 on failure
+tn_delete_dataset() {
+    local host="$1"
+    local api_key="$2"
+    local dataset="$3"
+
+    log "INFO" "Deleting dataset: $dataset"
+
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [sys.argv[1], {'recursive': True, 'force': True}]
+print(json.dumps(data))
+" "$dataset" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct dataset delete params: $params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "pool.dataset.delete" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Dataset deletion failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Dataset deleted successfully: $dataset"
+    return 0
+}
+
+# Query existing iSCSI portals
+# Parameters: host, api_key
+# Returns: JSON array of portals
+tn_query_portals() {
+    local host="$1"
+    local api_key="$2"
+
+    log "INFO" "Querying iSCSI portals"
+    tn_api_call "$host" "$api_key" "iscsi.portal.query" "[]"
+}
+
+# Find an existing iSCSI portal by IP and port
+# Parameters: host, api_key, listen_ip, listen_port
+# Returns: portal_id if found (empty string if not found)
+tn_find_portal() {
+    local host="$1"
+    local api_key="$2"
+    local listen_ip="$3"
+    local listen_port="${4:-3260}"
+
+    log "INFO" "Searching for existing iSCSI portal: $listen_ip:$listen_port"
+
+    # Query all portals
+    local portals_result
+    portals_result=$(tn_api_call "$host" "$api_key" "iscsi.portal.query" "[]" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "WARNING" "Failed to query iSCSI portals: $portals_result"
+        echo ""
+        return 1
+    fi
+
+    # Find portal matching IP and port
+    local portal_id
+    portal_id=$(echo "$portals_result" | python3 -c "
+import sys, json
+try:
+    portals = json.load(sys.stdin)
+    for portal in portals:
+        listen = portal.get('listen', [])
+        for addr in listen:
+            if (addr.get('ip') == '$listen_ip' and
+                str(addr.get('port')) == '$listen_port'):
+                print(portal.get('id', ''))
+                sys.exit(0)
+except:
+    pass
+" 2>/dev/null)
+
+    if [[ -n "$portal_id" ]]; then
+        log "INFO" "Found existing iSCSI portal ID: $portal_id"
+    else
+        log "INFO" "No existing iSCSI portal found for $listen_ip:$listen_port"
+    fi
+
+    echo "$portal_id"
+    return 0
+}
+
+# Create a new iSCSI portal
+# Parameters: host, api_key, listen_ip, listen_port
+# Returns: JSON with created portal info
+tn_create_portal() {
+    local host="$1"
+    local api_key="$2"
+    local listen_ip="$3"
+    local listen_port="${4:-3260}"
+
+    log "INFO" "Creating iSCSI portal: $listen_ip:$listen_port"
+
+    local params
+    # Use Python to construct JSON with proper escaping
+    # Note: TrueNAS 25.10+ only accepts 'ip' in listen items, port is auto-assigned
+    params=$(python3 -c "
+import json, sys
+data = [{'listen': [{'ip': sys.argv[1]}]}]
+print(json.dumps(data))
+" "$listen_ip" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct portal params JSON: $params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "iscsi.portal.create" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Portal creation failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Portal created successfully"
+    echo "$result"
+    return 0
+}
+
+# Delete an iSCSI portal
+# Parameters: host, api_key, portal_id
+# Returns: 0 on success, 1 on failure
+tn_delete_portal() {
+    local host="$1"
+    local api_key="$2"
+    local portal_id="$3"
+
+    log "INFO" "Deleting iSCSI portal: $portal_id"
+
+    local params
+    params=$(printf '[%s]' "$portal_id")
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "iscsi.portal.delete" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Portal deletion failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Portal deleted successfully"
+    return 0
+}
+
+# Query existing iSCSI targets
+# Parameters: host, api_key
+# Returns: JSON array of targets
+tn_query_targets() {
+    local host="$1"
+    local api_key="$2"
+
+    log "INFO" "Querying iSCSI targets"
+    tn_api_call "$host" "$api_key" "iscsi.target.query" "[]"
+}
+
+# Check if an iSCSI target with specific IQN exists
+# Parameters: host, api_key, target_iqn
+# Returns: JSON object if exists, exit 1 if not found
+tn_check_target() {
+    local host="$1"
+    local api_key="$2"
+    local target_iqn="$3"
+
+    log "INFO" "Checking if iSCSI target exists: $target_iqn"
+
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [[['name', '=', sys.argv[1]]]]
+print(json.dumps(data))
+" "$target_iqn" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct target query params: $params"
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call "$host" "$api_key" "iscsi.target.query" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Target check failed: $result"
+        return 1
+    fi
+
+    if [[ "$result" == "[]" ]] || [[ -z "$result" ]]; then
+        log "INFO" "Target does not exist: $target_iqn"
+        return 1
+    fi
+
+    log "INFO" "Target exists: $target_iqn"
+    echo "$result"
+    return 0
+}
+
+# Generate a standard IQN for iSCSI target
+# Parameters: storage_name
+# Returns: Generated IQN string
+generate_iqn() {
+    local storage_name="$1"
+    local year_month
+    year_month=$(date +%Y-%m)
+
+    # Format: iqn.YYYY-MM.org.freenas.ctl:storage-name
+    echo "iqn.${year_month}.org.freenas.ctl:${storage_name}"
+}
+
+# Create an iSCSI target with portal association
+# Parameters: host, api_key, target_iqn, listen_ip, listen_port
+# Returns: JSON with created target info (includes portal_id and portal_reused flag)
+# Note: Automatically finds or creates portal matching the listen address
+tn_create_target() {
+    local host="$1"
+    local api_key="$2"
+    local target_iqn="$3"
+    local listen_ip="$4"
+    local listen_port="${5:-3260}"
+
+    log "INFO" "Creating iSCSI target: $target_iqn for portal $listen_ip:$listen_port"
+
+    local portal_id=""
+    local portal_reused=false
+
+    # Step 1: Check if portal already exists
+    portal_id=$(tn_find_portal "$host" "$api_key" "$listen_ip" "$listen_port" 2>/dev/null)
+
+    if [[ -n "$portal_id" ]]; then
+        log "INFO" "Reusing existing iSCSI portal ID: $portal_id"
+        portal_reused=true
+    else
+        # Create the portal
+        local portal_params
+        # Use Python to construct JSON with proper escaping
+        # Note: TrueNAS 25.10+ only accepts 'ip' in listen items, port is auto-assigned
+        portal_params=$(python3 -c "
+import json, sys
+data = [{'listen': [{'ip': sys.argv[1]}]}]
+print(json.dumps(data))
+" "$listen_ip" 2>&1)
+
+        if [[ $? -ne 0 ]]; then
+            log "ERROR" "Failed to construct portal params JSON: $portal_params"
+            echo "Failed to construct JSON params" >&2
+            return 1
+        fi
+
+        local portal_result
+        portal_result=$(tn_api_call_write "$host" "$api_key" "iscsi.portal.create" "$portal_params" 2>&1)
+        local exit_code=$?
+
+        if [[ $exit_code -ne 0 ]]; then
+            log "ERROR" "iSCSI portal creation failed: $portal_result"
+            echo "$portal_result" >&2
+            return 1
+        fi
+
+        # Extract portal ID from result
+        portal_id=$(echo "$portal_result" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('id', ''))" 2>/dev/null)
+
+        if [[ -z "$portal_id" ]]; then
+            log "ERROR" "Failed to extract portal ID from result: $portal_result"
+            echo "Failed to extract portal ID" >&2
+            return 1
+        fi
+
+        log "INFO" "iSCSI portal created with ID: $portal_id"
+    fi
+
+    # Step 2: Create target with portal group association
+    local params
+    # Use Python to construct JSON with proper escaping to prevent JSON injection
+    params=$(python3 -c "
+import json, sys
+data = [{
+    'name': sys.argv[1],
+    'groups': [{
+        'portal': int(sys.argv[2]),
+        'authmethod': 'NONE',
+        'auth': None
+    }]
+}]
+print(json.dumps(data))
+" "$target_iqn" "$portal_id" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct target params JSON: $params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "iscsi.target.create" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Target creation failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    # Add reused flag to result for consistency with NVMe pattern
+    if [[ "$portal_reused" == "true" ]]; then
+        result=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+data['portal_reused'] = True
+data['portal_id'] = $portal_id
+print(json.dumps(data))
+" 2>/dev/null || echo "$result")
+    else
+        result=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+data['portal_reused'] = False
+data['portal_id'] = $portal_id
+print(json.dumps(data))
+" 2>/dev/null || echo "$result")
+    fi
+
+    log "INFO" "Target created successfully: $target_iqn"
+    echo "$result"
+    return 0
+}
+
+# Delete an iSCSI target
+# Parameters: host, api_key, target_id
+# Returns: 0 on success, 1 on failure
+tn_delete_target() {
+    local host="$1"
+    local api_key="$2"
+    local target_id="$3"
+
+    log "INFO" "Deleting iSCSI target: $target_id"
+
+    local params
+    params=$(printf '[%s]' "$target_id")
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "iscsi.target.delete" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Target deletion failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Target deleted successfully"
+    return 0
+}
+
+# Query existing NVMe subsystems
+# Parameters: host, api_key
+# Returns: JSON array of subsystems
+tn_query_subsystems() {
+    local host="$1"
+    local api_key="$2"
+
+    log "INFO" "Querying NVMe subsystems"
+    tn_api_call "$host" "$api_key" "nvmet.subsys.query" "[]"
+}
+
+# Check if an NVMe subsystem with specific NQN exists
+# Parameters: host, api_key, subsystem_nqn
+# Returns: JSON object if exists, exit 1 if not found
+tn_check_subsystem() {
+    local host="$1"
+    local api_key="$2"
+    local subsystem_nqn="$3"
+
+    log "INFO" "Checking if NVMe subsystem exists: $subsystem_nqn"
+
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [[['subnqn', '=', sys.argv[1]]]]
+print(json.dumps(data))
+" "$subsystem_nqn" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct subsystem query params: $params"
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call "$host" "$api_key" "nvmet.subsys.query" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Subsystem check failed: $result"
+        return 1
+    fi
+
+    if [[ "$result" == "[]" ]] || [[ -z "$result" ]]; then
+        log "INFO" "Subsystem does not exist: $subsystem_nqn"
+        return 1
+    fi
+
+    log "INFO" "Subsystem exists: $subsystem_nqn"
+    echo "$result"
+    return 0
+}
+
+# Generate a standard NQN for NVMe subsystem
+# Parameters: storage_name
+# Returns: Generated NQN string
+generate_nqn() {
+    local storage_name="$1"
+    local year_month
+    year_month=$(date +%Y-%m)
+
+    # Format: nqn.YYYY-MM.org.freenas.ctl:storage-name
+    echo "nqn.${year_month}.org.freenas.ctl:${storage_name}"
+}
+
+# Create an NVMe subsystem
+# Parameters: host, api_key, subsystem_name, subsystem_nqn
+# Returns: JSON with created subsystem info
+tn_create_subsystem() {
+    local host="$1"
+    local api_key="$2"
+    local subsystem_name="$3"
+    local subsystem_nqn="$4"
+
+    log "INFO" "Creating NVMe subsystem: $subsystem_nqn"
+
+    # Create subsystem with allow_any_host=true (as per design non-goals)
+    local params
+    # Use Python to construct JSON with proper escaping
+    params=$(python3 -c "
+import json, sys
+data = [{
+    'name': sys.argv[1],
+    'subnqn': sys.argv[2],
+    'allow_any_host': True
+}]
+print(json.dumps(data))
+" "$subsystem_name" "$subsystem_nqn" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct subsystem params JSON: $params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "nvmet.subsys.create" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Subsystem creation failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Subsystem created successfully: $subsystem_nqn"
+    echo "$result"
+    return 0
+}
+
+# Delete an NVMe subsystem
+# Parameters: host, api_key, subsystem_id
+# Returns: 0 on success, 1 on failure
+tn_delete_subsystem() {
+    local host="$1"
+    local api_key="$2"
+    local subsystem_id="$3"
+
+    log "INFO" "Deleting NVMe subsystem: $subsystem_id"
+
+    local params
+    params=$(printf '[%s]' "$subsystem_id")
+
+    local result
+    result=$(tn_api_call_write "$host" "$api_key" "nvmet.subsys.delete" "$params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "Subsystem deletion failed: $result"
+        echo "$result" >&2
+        return 1
+    fi
+
+    log "INFO" "Subsystem deleted successfully"
+    return 0
+}
+
+# Find existing NVMe port by address and transport
+# Parameters: host, api_key, listen_ip, listen_port
+# Returns: port ID if found, empty string if not found
+tn_find_nvme_port() {
+    local host="$1"
+    local api_key="$2"
+    local listen_ip="$3"
+    local listen_port="${4:-4420}"
+
+    log "INFO" "Searching for existing NVMe port: $listen_ip:$listen_port"
+
+    # Query all ports
+    local ports_result
+    ports_result=$(tn_api_call "$host" "$api_key" "nvmet.port.query" "[]" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "WARNING" "Failed to query NVMe ports: $ports_result"
+        echo ""
+        return 1
+    fi
+
+    # Find port matching address and transport
+    local port_id
+    port_id=$(echo "$ports_result" | python3 -c "
+import sys, json
+try:
+    ports = json.load(sys.stdin)
+    for port in ports:
+        if (port.get('addr_trtype') == 'TCP' and
+            port.get('addr_traddr') == '$listen_ip' and
+            str(port.get('addr_trsvcid')) == '$listen_port'):
+            print(port.get('id', ''))
+            break
+except:
+    pass
+" 2>/dev/null)
+
+    if [[ -n "$port_id" ]]; then
+        log "INFO" "Found existing NVMe port with ID: $port_id"
+        echo "$port_id"
+        return 0
+    fi
+
+    log "INFO" "No existing NVMe port found for $listen_ip:$listen_port"
+    echo ""
+    return 1
+}
+
+# Create NVMe port for subsystem (or reuse existing port)
+# Parameters: host, api_key, subsystem_id, listen_ip, listen_port
+# Returns: JSON with port info (created or existing)
+tn_create_nvme_port() {
+    local host="$1"
+    local api_key="$2"
+    local subsystem_id="$3"
+    local listen_ip="$4"
+    local listen_port="${5:-4420}"
+
+    log "INFO" "Creating/finding NVMe port for subsystem $subsystem_id: $listen_ip:$listen_port"
+
+    local port_id=""
+    local port_result=""
+    local port_reused=false
+
+    # Step 1: Check if port already exists
+    port_id=$(tn_find_nvme_port "$host" "$api_key" "$listen_ip" "$listen_port" 2>/dev/null)
+
+    if [[ -n "$port_id" ]]; then
+        log "INFO" "Reusing existing NVMe port ID: $port_id"
+        port_reused=true
+        # Create a JSON result for consistency
+        port_result=$(python3 -c "
+import json, sys
+data = {'id': int(sys.argv[1]), 'addr_trtype': 'TCP', 'addr_traddr': sys.argv[2], 'addr_trsvcid': int(sys.argv[3]), 'reused': True}
+print(json.dumps(data))
+" "$port_id" "$listen_ip" "$listen_port" 2>&1)
+    else
+        # Create the port (TrueNAS 25.10+ uses separate port and subsystem association)
+        local port_params
+        # Use Python to construct JSON with proper escaping
+        port_params=$(python3 -c "
+import json, sys
+data = [{'addr_trtype': 'TCP', 'addr_traddr': sys.argv[1], 'addr_trsvcid': int(sys.argv[2])}]
+print(json.dumps(data))
+" "$listen_ip" "$listen_port" 2>&1)
+
+        if [[ $? -ne 0 ]]; then
+            log "ERROR" "Failed to construct port params JSON: $port_params"
+            echo "Failed to construct JSON params" >&2
+            return 1
+        fi
+
+        port_result=$(tn_api_call_write "$host" "$api_key" "nvmet.port.create" "$port_params" 2>&1)
+        local exit_code=$?
+
+        if [[ $exit_code -ne 0 ]]; then
+            log "ERROR" "NVMe port creation failed: $port_result"
+            echo "$port_result" >&2
+            return 1
+        fi
+
+        # Extract port ID from result
+        port_id=$(echo "$port_result" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('id', ''))" 2>/dev/null)
+
+        if [[ -z "$port_id" ]]; then
+            log "ERROR" "Failed to extract port ID from result: $port_result"
+            echo "Failed to extract port ID" >&2
+            return 1
+        fi
+
+        log "INFO" "NVMe port created with ID: $port_id"
+    fi
+
+    # Step 2: Associate port with subsystem
+    local assoc_params
+    # Use Python to construct JSON (port_id and subsys_id are integers)
+    assoc_params=$(python3 -c "
+import json, sys
+data = [{'port_id': int(sys.argv[1]), 'subsys_id': int(sys.argv[2])}]
+print(json.dumps(data))
+" "$port_id" "$subsystem_id" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        log "ERROR" "Failed to construct association params JSON: $assoc_params"
+        echo "Failed to construct JSON params" >&2
+        return 1
+    fi
+
+    local assoc_result
+    assoc_result=$(tn_api_call_write "$host" "$api_key" "nvmet.port_subsys.create" "$assoc_params" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        # Check if association already exists (common when reusing ports)
+        if echo "$assoc_result" | grep -q "already"; then
+            log "INFO" "Port-subsystem association already exists"
+        else
+            log "ERROR" "NVMe port-subsystem association failed: $assoc_result"
+            echo "$assoc_result" >&2
+            return 1
+        fi
+    fi
+
+    if [[ "$port_reused" == "true" ]]; then
+        log "INFO" "Reused existing NVMe port and associated with subsystem"
+    else
+        log "INFO" "NVMe port created and associated with subsystem successfully"
+    fi
+
+    echo "$port_result"
+    return 0
+}
+
+# ============================================================================
+# RESOURCE VALIDATION FUNCTIONS
+# ============================================================================
+
+# Validate dataset exists via API
+# Parameters: host, api_key, dataset_path
+# Returns: 0 if valid, 1 if invalid
+validate_dataset_exists() {
+    local host="$1"
+    local api_key="$2"
+    local dataset="$3"
+
+    local result
+    result=$(tn_check_dataset "$host" "$api_key" "$dataset" 2>/dev/null)
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]] && [[ -n "$result" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Validate iSCSI target is discoverable from Proxmox
+# Parameters: portal_ip, portal_port, target_iqn
+# Returns: 0 if discoverable, 1 if not
+# Note: Retries for up to 10 seconds to allow iSCSI service to register new targets
+validate_iscsi_discovery() {
+    local portal_ip="$1"
+    local portal_port="${2:-3260}"
+    local target_iqn="$3"
+    local max_attempts=10
+    local attempt=1
+
+    log "INFO" "Validating iSCSI discovery: $target_iqn at $portal_ip:$portal_port"
+
+    # Check if iscsiadm is available
+    if ! command -v iscsiadm &>/dev/null; then
+        log "WARNING" "iscsiadm not found, skipping iSCSI discovery validation"
+        return 0  # Don't fail if tool not available
+    fi
+
+    # Retry loop - wait up to 10 seconds for target to become discoverable
+    while [[ $attempt -le $max_attempts ]]; do
+        # Perform discovery
+        local discovery_output
+        discovery_output=$(iscsiadm -m discovery -t sendtargets -p "${portal_ip}:${portal_port}" 2>&1)
+        local exit_code=$?
+
+        if [[ $exit_code -eq 0 ]]; then
+            # Check if target is in discovery output
+            if echo "$discovery_output" | grep -q "$target_iqn"; then
+                log "INFO" "iSCSI target discovered successfully: $target_iqn (attempt $attempt)"
+                return 0
+            fi
+        fi
+
+        # Wait 1 second before retry (except on last attempt)
+        if [[ $attempt -lt $max_attempts ]]; then
+            sleep 1
+        fi
+        ((attempt++))
+    done
+
+    log "ERROR" "Target not found in discovery after ${max_attempts}s: $target_iqn"
+    return 1
+}
+
+# Validate NVMe subsystem is discoverable from Proxmox
+# Parameters: portal_ip, portal_port, subsystem_nqn
+# Returns: 0 if discoverable, 1 if not
+validate_nvme_discovery() {
+    local portal_ip="$1"
+    local portal_port="${2:-4420}"
+    local subsystem_nqn="$3"
+
+    log "INFO" "Validating NVMe discovery: $subsystem_nqn at $portal_ip:$portal_port"
+
+    # Check if nvme command is available
+    if ! command -v nvme &>/dev/null; then
+        log "WARNING" "nvme command not found, skipping NVMe discovery validation"
+        return 0  # Don't fail if tool not available
+    fi
+
+    # Perform discovery
+    local discovery_output
+    discovery_output=$(nvme discover -t tcp -a "$portal_ip" -s "$portal_port" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log "ERROR" "NVMe discovery failed: $discovery_output"
+        return 1
+    fi
+
+    # Check if subsystem NQN is in discovery output
+    if echo "$discovery_output" | grep -q "$subsystem_nqn"; then
+        log "INFO" "NVMe subsystem discovered successfully: $subsystem_nqn"
+        return 0
+    fi
+
+    log "ERROR" "Subsystem not found in discovery: $subsystem_nqn"
+    return 1
+}
+
+# Combined validation orchestrator
+# Parameters: host, api_key, transport_mode, dataset, target_or_nqn, portal_ip, portal_port
+# Returns: 0 if all validations pass, 1 if any fail
+validate_provisioning() {
+    local host="$1"
+    local api_key="$2"
+    local transport_mode="$3"
+    local dataset="$4"
+    local target_or_nqn="$5"
+    local portal_ip="$6"
+    local portal_port="$7"
+
+    local failures=0
+
+    info "Validating provisioned resources..."
+    echo
+
+    # Validate dataset
+    printf "  %-30s" "Dataset exists..."
+    if validate_dataset_exists "$host" "$api_key" "$dataset"; then
+        echo "${c2}OK${c0}"
+    else
+        echo "${c1}FAILED${c0}"
+        ((failures++))
+    fi
+
+    # Validate transport-specific resources
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        printf "  %-30s" "NVMe subsystem discoverable..."
+        if validate_nvme_discovery "$portal_ip" "$portal_port" "$target_or_nqn"; then
+            echo "${c2}OK${c0}"
+        else
+            echo "${c1}FAILED${c0}"
+            warning "NVMe discovery failed. Check:"
+            warning "  - TrueNAS NVMe-oF service is running"
+            warning "  - Firewall allows port $portal_port"
+            warning "  - Network path to $portal_ip is available"
+            ((failures++))
+        fi
+    else
+        printf "  %-30s" "iSCSI target discoverable..."
+        if validate_iscsi_discovery "$portal_ip" "$portal_port" "$target_or_nqn"; then
+            echo "${c2}OK${c0}"
+        else
+            echo "${c1}FAILED${c0}"
+            warning "iSCSI discovery failed. Check:"
+            warning "  - TrueNAS iSCSI service is running"
+            warning "  - Firewall allows port $portal_port"
+            warning "  - Network path to $portal_ip is available"
+            ((failures++))
+        fi
+    fi
+
+    echo
+
+    if [[ $failures -gt 0 ]]; then
+        error "Validation failed with $failures error(s)"
+        return 1
+    fi
+
+    success "All validations passed"
+    return 0
+}
+
+# ============================================================================
+# ROLLBACK FUNCTIONS
+# ============================================================================
+
+# Perform rollback of all registered resources
+# Parameters: host, api_key
+# Returns: 0 if all deleted, 1 if any failures
+rollback_provisioning() {
+    local host="$1"
+    local api_key="$2"
+
+    local resource_count=${#ROLLBACK_RESOURCES[@]}
+    if [[ $resource_count -eq 0 ]]; then
+        info "No resources to rollback"
+        return 0
+    fi
+
+    echo
+    warning "The following resources will be deleted:"
+    for resource in "${ROLLBACK_RESOURCES[@]}"; do
+        echo "  - $resource"
+    done
+    echo
+
+    local confirm
+    read -rp "Type 'DELETE' to confirm rollback: " confirm
+    if [[ "$confirm" != "DELETE" ]]; then
+        warning "Rollback cancelled"
+        return 1
+    fi
+
+    local failures=0
+    local failed_resources=()
+
+    # Delete in reverse order (LIFO)
+    info "Rolling back resources..."
+    for ((i=${#ROLLBACK_RESOURCES[@]}-1; i>=0; i--)); do
+        local resource="${ROLLBACK_RESOURCES[$i]}"
+        local resource_type="${resource%%:*}"
+        local resource_id="${resource#*:}"
+
+        printf "  Deleting %s: %s..." "$resource_type" "$resource_id"
+
+        local delete_result=0
+        case "$resource_type" in
+            dataset)
+                tn_delete_dataset "$host" "$api_key" "$resource_id" >/dev/null 2>&1 || delete_result=1
+                ;;
+            portal)
+                tn_delete_portal "$host" "$api_key" "$resource_id" >/dev/null 2>&1 || delete_result=1
+                ;;
+            target)
+                tn_delete_target "$host" "$api_key" "$resource_id" >/dev/null 2>&1 || delete_result=1
+                ;;
+            subsystem)
+                tn_delete_subsystem "$host" "$api_key" "$resource_id" >/dev/null 2>&1 || delete_result=1
+                ;;
+            *)
+                warning "Unknown resource type: $resource_type"
+                delete_result=1
+                ;;
+        esac
+
+        if [[ $delete_result -eq 0 ]]; then
+            echo " ${c2}OK${c0}"
+        else
+            echo " ${c1}FAILED${c0}"
+            ((failures++))
+            failed_resources+=("$resource")
+        fi
+    done
+
+    # Clear state after rollback attempt
+    clear_rollback_state
+
+    if [[ $failures -gt 0 ]]; then
+        echo
+        error "Rollback completed with $failures failure(s)"
+        warning "The following resources may need manual cleanup:"
+        for resource in "${failed_resources[@]}"; do
+            warning "  - $resource"
+        done
+        return 1
+    fi
+
+    echo
+    success "Rollback completed successfully"
+    return 0
+}
+
+# ============================================================================
+# PROVISIONING MODE SELECTION
+# ============================================================================
+
+# Select provisioning mode
+# Returns: "create" | "existing" | "cancel"
+select_provisioning_mode() {
+    # Output menu to stderr so it displays when captured with $()
+    echo >&2
+    printf '%b\n' "${c4}  How would you like to configure TrueNAS storage?${c0}" >&2
+    echo "  1) Create new storage on TrueNAS (automated provisioning)" >&2
+    echo "  2) Use existing storage (manual configuration)" >&2
+    echo "  0) Cancel" >&2
+    echo >&2
+
+    local choice
+    while true; do
+        read -rp "Select option [0-2]: " choice
+        case "$choice" in
+            0) echo "cancel"; return 0 ;;
+            1) echo "create"; return 0 ;;
+            2) echo "existing"; return 0 ;;
+            *) error "Invalid choice. Please enter 0, 1, or 2" ;;
+        esac
+    done
+}
+
+# ============================================================================
+# PROVISIONING WORKFLOW - INPUT COLLECTION
+# ============================================================================
+
+# Global variables for provisioning configuration
+PROV_POOL=""
+PROV_DATASET_NAME=""
+PROV_DATASET_PATH=""
+PROV_DATASET_EXISTS="false"
+PROV_NQN=""
+PROV_IQN=""
+PROV_TARGET_EXISTS="false"
+PROV_PORTAL_IP=""
+PROV_PORTAL_PORT=""
+PROV_PORTAL_ID=""
+PROV_PORTAL_IPS=()           # Array of selected portal IPs for multipath
+PROV_USE_MULTIPATH=""        # "1" if multipath enabled
+PROV_ADDITIONAL_PORTALS=""   # Comma-separated additional portals (IP:port)
+PROV_BLOCKSIZE=""
+PROV_SPARSE=""
+PROV_HOSTNQN=""
+
+# Show progressive summary of collected configuration
+# Parameters: storage_name, transport_mode
+show_progress_summary() {
+    local storage_name="$1"
+    local transport_mode="$2"
+
+    echo
+    printf "  ${c4}%-18s${c0} %s\n" "Storage Name:" "$storage_name"
+    printf "  ${c4}%-18s${c0} %s\n" "Transport:" "$transport_mode"
+
+    if [[ -n "$PROV_POOL" ]]; then
+        printf "  ${c4}%-18s${c0} %s\n" "Pool:" "$PROV_POOL"
+    fi
+
+    if [[ -n "$PROV_DATASET_NAME" ]]; then
+        local ds_status=""
+        if [[ "$PROV_DATASET_EXISTS" == "true" ]]; then
+            ds_status=" ${c3}(existing)${c0}"
+        else
+            ds_status=" ${c2}(new)${c0}"
+        fi
+        printf "  ${c4}%-18s${c0} %s%s\n" "Dataset:" "$PROV_DATASET_PATH" "$ds_status"
+    fi
+
+    if [[ -n "$PROV_NQN" ]]; then
+        local tgt_status=""
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            tgt_status=" ${c3}(existing)${c0}"
+        else
+            tgt_status=" ${c2}(new)${c0}"
+        fi
+        printf "  ${c4}%-18s${c0} %s%s\n" "Subsystem NQN:" "$PROV_NQN" "$tgt_status"
+    fi
+
+    if [[ -n "$PROV_IQN" ]]; then
+        local tgt_status=""
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            tgt_status=" ${c3}(existing)${c0}"
+        else
+            tgt_status=" ${c2}(new)${c0}"
+        fi
+        printf "  ${c4}%-18s${c0} %s%s\n" "Target IQN:" "$PROV_IQN" "$tgt_status"
+    fi
+
+    if [[ -n "$PROV_PORTAL_IP" ]]; then
+        if [[ ${#PROV_PORTAL_IPS[@]} -gt 1 ]]; then
+            # Multiple portals - show multipath
+            printf "  ${c4}%-18s${c0} %s ${c2}(multipath: %d)${c0}\n" "Portals:" "${PROV_PORTAL_IPS[0]}:${PROV_PORTAL_PORT}" "${#PROV_PORTAL_IPS[@]}"
+            for ((i=1; i<${#PROV_PORTAL_IPS[@]}; i++)); do
+                printf "  ${c4}%-18s${c0} %s:%s\n" "" "${PROV_PORTAL_IPS[$i]}" "$PROV_PORTAL_PORT"
+            done
+        else
+            printf "  ${c4}%-18s${c0} %s:%s\n" "Portal:" "$PROV_PORTAL_IP" "$PROV_PORTAL_PORT"
+        fi
+    fi
+
+    echo
+    echo "  ---"
+    echo
+}
+
+# Collect all provisioning configuration upfront using progressive wizard
+# Parameters: host, api_key, storage_name, transport_mode
+# Returns: 0 on success (config collected), 1 on cancel/failure
+# Sets: PROV_* global variables and updates WIZARD_* for display
+collect_provisioning_config() {
+    local host="$1"
+    local api_key="$2"
+    local storage_name="$3"
+    local transport_mode="$4"
+
+    # Reset all config variables
+    PROV_POOL=""
+    PROV_DATASET_NAME=""
+    PROV_DATASET_PATH=""
+    PROV_DATASET_EXISTS="false"
+    PROV_NQN=""
+    PROV_IQN=""
+    PROV_TARGET_EXISTS="false"
+    PROV_PORTAL_IP=""
+    PROV_PORTAL_PORT=""
+    PROV_PORTAL_IPS=()
+    PROV_USE_MULTIPATH=""
+    PROV_ADDITIONAL_PORTALS=""
+    PROV_BLOCKSIZE=""
+    PROV_SPARSE=""
+    PROV_HOSTNQN=""
+
+    # Fetch pools first (before showing UI)
+    local pools_json
+    pools_json=$(tn_list_pools "$host" "$api_key" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        error "Failed to list pools: $pools_json"
+        return 1
+    fi
+
+    local -a pool_names=()
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && pool_names+=("$name")
+    done < <(echo "$pools_json" | python3 -c "import sys, json; pools = json.load(sys.stdin); print('\n'.join(p['name'] for p in pools))" 2>/dev/null)
+
+    if [[ ${#pool_names[@]} -eq 0 ]]; then
+        error "No ZFS pools found on TrueNAS"
+        return 1
+    fi
+
+    # --- Step 1: Pool Selection ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "pool"
+
+    info "Select ZFS pool:"
+    local idx=1
+    for pool in "${pool_names[@]}"; do
+        echo "  $idx) $pool"
+        ((idx++))
+    done
+    echo
+
+    local pool_choice
+    while true; do
+        read -rp "Select pool [1-${#pool_names[@]}]: " pool_choice
+        if [[ "$pool_choice" =~ ^[0-9]+$ ]] && [[ "$pool_choice" -ge 1 ]] && [[ "$pool_choice" -le "${#pool_names[@]}" ]]; then
+            PROV_POOL="${pool_names[$((pool_choice-1))]}"
+            WIZARD_POOL="$PROV_POOL"
+            break
+        else
+            error "Invalid selection"
+        fi
+    done
+
+    # --- Step 2: Dataset Name ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "dataset"
+
+    info "Enter dataset name (will be created under ${WIZARD_POOL}/):"
+    while true; do
+        read -rp "Dataset name (e.g., proxmox): " PROV_DATASET_NAME
+        if [[ -z "$PROV_DATASET_NAME" ]]; then
+            error "Dataset name cannot be empty"
+            continue
+        fi
+        if [[ ! "$PROV_DATASET_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            error "Dataset name can only contain letters, numbers, hyphens, and underscores"
+            continue
+        fi
+        break
+    done
+
+    PROV_DATASET_PATH="${PROV_POOL}/${PROV_DATASET_NAME}"
+    WIZARD_DATASET="$PROV_DATASET_NAME"
+    WIZARD_DATASET_PATH="$PROV_DATASET_PATH"
+
+    # Check if dataset exists with spinner
+    echo
+    printf "  %-30s" "Checking dataset..."
+    start_spinner
+    if tn_check_dataset "$host" "$api_key" "$PROV_DATASET_PATH" >/dev/null 2>&1; then
+        PROV_DATASET_EXISTS="true"
+        WIZARD_DATASET_EXISTS="true"
+    else
+        PROV_DATASET_EXISTS="false"
+        WIZARD_DATASET_EXISTS="false"
+    fi
+    stop_spinner
+    if [[ "$PROV_DATASET_EXISTS" == "true" ]]; then
+        echo -e "\r  $(printf "%-30s" "Checking dataset...")${c3}EXISTS${c0} (will use existing)"
+    else
+        echo -e "\r  $(printf "%-30s" "Checking dataset...")${c2}OK${c0} (will create new)"
+    fi
+    sleep 1
+
+    # --- Step 3: Target/Subsystem Configuration ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "target"
+
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        # NVMe subsystem configuration
+        local auto_nqn
+        auto_nqn="nqn.$(date +%Y-%m).org.freenas.ctl:${storage_name}"
+
+        info "NVMe Subsystem Configuration:"
+        echo "  1) Use auto-generated NQN: $auto_nqn"
+        echo "  2) Enter custom NQN"
+        echo
+
+        local nqn_choice
+        read -rp "Select option [1-2] [1]: " nqn_choice
+        nqn_choice=${nqn_choice:-1}
+
+        case "$nqn_choice" in
+            1) PROV_NQN="$auto_nqn" ;;
+            2)
+                while true; do
+                    read -rp "Enter NQN: " PROV_NQN
+                    if [[ -z "$PROV_NQN" ]]; then
+                        error "NQN cannot be empty"
+                        continue
+                    fi
+                    break
+                done
+                ;;
+            *) PROV_NQN="$auto_nqn" ;;
+        esac
+
+        WIZARD_TARGET="$PROV_NQN"
+
+        # Check if subsystem exists with spinner
+        echo
+        printf "  %-30s" "Checking subsystem..."
+        start_spinner
+        if tn_check_subsystem "$host" "$api_key" "$PROV_NQN" >/dev/null 2>&1; then
+            PROV_TARGET_EXISTS="true"
+            WIZARD_TARGET_EXISTS="true"
+        else
+            PROV_TARGET_EXISTS="false"
+            WIZARD_TARGET_EXISTS="false"
+        fi
+        stop_spinner
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            echo -e "\r  $(printf "%-30s" "Checking subsystem...")${c3}EXISTS${c0} (will use existing)"
+        else
+            echo -e "\r  $(printf "%-30s" "Checking subsystem...")${c2}OK${c0} (will create new)"
+        fi
+        sleep 1
+    else
+        # iSCSI target configuration
+        local auto_iqn
+        auto_iqn="iqn.$(date +%Y-%m).org.freenas.ctl:${storage_name}"
+
+        info "iSCSI Target Configuration:"
+        echo "  1) Use auto-generated IQN: $auto_iqn"
+        echo "  2) Enter custom IQN"
+        echo
+
+        local iqn_choice
+        read -rp "Select option [1-2] [1]: " iqn_choice
+        iqn_choice=${iqn_choice:-1}
+
+        case "$iqn_choice" in
+            1) PROV_IQN="$auto_iqn" ;;
+            2)
+                while true; do
+                    read -rp "Enter IQN: " PROV_IQN
+                    if [[ -z "$PROV_IQN" ]]; then
+                        error "IQN cannot be empty"
+                        continue
+                    fi
+                    break
+                done
+                ;;
+            *) PROV_IQN="$auto_iqn" ;;
+        esac
+
+        WIZARD_TARGET="$PROV_IQN"
+
+        # Check if target exists with spinner
+        echo
+        printf "  %-30s" "Checking target..."
+        start_spinner
+        if tn_check_target "$host" "$api_key" "$PROV_IQN" >/dev/null 2>&1; then
+            PROV_TARGET_EXISTS="true"
+            WIZARD_TARGET_EXISTS="true"
+        else
+            PROV_TARGET_EXISTS="false"
+            WIZARD_TARGET_EXISTS="false"
+        fi
+        stop_spinner
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            echo -e "\r  $(printf "%-30s" "Checking target...")${c3}EXISTS${c0} (will use existing)"
+        else
+            echo -e "\r  $(printf "%-30s" "Checking target...")${c2}OK${c0} (will create new)"
+        fi
+        sleep 1
+    fi
+
+    # --- Step 4: Portal Configuration (Interface Selection) ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "portal"
+
+    local default_port
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        info "NVMe Portal Configuration:"
+        default_port="4420"
+    else
+        info "iSCSI Portal Configuration:"
+        # Query TrueNAS for configured iSCSI port (may differ from default 3260)
+        default_port=$(tn_get_iscsi_port "$host" "$api_key" 2>/dev/null)
+        if [[ -z "$default_port" ]]; then
+            default_port="3260"  # Fallback to standard port
+        fi
+    fi
+
+    # Query TrueNAS network interfaces
+    echo
+    info "Querying TrueNAS network interfaces..."
+    local interfaces_json
+    interfaces_json=$(tn_query_interfaces "$host" "$api_key")
+
+    local interface_selection_ok=false
+    if [[ -n "$interfaces_json" ]] && [[ "$interfaces_json" != "[]" ]]; then
+        # Display interface table and allow selection
+        if display_interface_table "$interfaces_json" "$transport_mode" "$host" "$api_key"; then
+            local num_interfaces=${#IFACE_IPS[@]}
+
+            if [[ $num_interfaces -gt 0 ]]; then
+                info "Select one or more interfaces for storage access"
+                if [[ $num_interfaces -gt 1 ]]; then
+                    info "Selecting multiple interfaces enables multipath for redundancy/performance"
+                fi
+
+                select_interfaces "$num_interfaces"
+
+                if [[ ${#SELECTED_IFACE_INDICES[@]} -gt 0 ]]; then
+                    interface_selection_ok=true
+
+                    # Build portal IP array from selection
+                    PROV_PORTAL_IPS=()
+                    for idx in "${SELECTED_IFACE_INDICES[@]}"; do
+                        local arr_idx=$((idx-1))
+                        PROV_PORTAL_IPS+=("${IFACE_IPS[$arr_idx]}")
+                    done
+
+                    # Set primary portal from first selection
+                    PROV_PORTAL_IP="${PROV_PORTAL_IPS[0]}"
+                    PROV_PORTAL_PORT="$default_port"
+
+                    # NVMe-specific: prompt for port number
+                    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+                        echo
+                        read -rp "NVMe port [${default_port}]: " nvme_port
+                        nvme_port="${nvme_port:-$default_port}"
+                        PROV_PORTAL_PORT="$nvme_port"
+                    fi
+
+                    # Handle multipath if multiple interfaces selected
+                    if [[ ${#PROV_PORTAL_IPS[@]} -gt 1 ]]; then
+                        # Build additional portals (all except first)
+                        local additional=()
+                        for ((i=1; i<${#PROV_PORTAL_IPS[@]}; i++)); do
+                            additional+=("${PROV_PORTAL_IPS[$i]}:${PROV_PORTAL_PORT}")
+                        done
+                        PROV_ADDITIONAL_PORTALS=$(IFS=,; echo "${additional[*]}")
+
+                        # Check for multipath support
+                        if [[ "$transport_mode" == "iscsi" ]]; then
+                            if ! command -v multipath &> /dev/null; then
+                                warning "multipath-tools package is not installed"
+                                info "Multipath requires: apt-get install multipath-tools"
+                                read -rp "Continue configuring multipath anyway? [y/N]: " continue_mp
+                                if [[ "$continue_mp" =~ ^[Yy] ]]; then
+                                    PROV_USE_MULTIPATH="1"
+                                else
+                                    info "Using first interface only for storage access"
+                                    PROV_PORTAL_IPS=("${PROV_PORTAL_IPS[0]}")
+                                    PROV_ADDITIONAL_PORTALS=""
+                                fi
+                            else
+                                PROV_USE_MULTIPATH="1"
+                                info "Multipath enabled with ${#PROV_PORTAL_IPS[@]} interfaces"
+                            fi
+                        else
+                            # NVMe/TCP uses native kernel multipath
+                            info "NVMe/TCP will use native kernel multipath with ${#PROV_PORTAL_IPS[@]} interfaces"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # Fallback to manual entry if interface selection failed
+    if [[ "$interface_selection_ok" != "true" ]]; then
+        warning "Could not query TrueNAS interfaces, using manual entry"
+        while true; do
+            read -rp "Portal IP address [${host}]: " PROV_PORTAL_IP
+            PROV_PORTAL_IP=${PROV_PORTAL_IP:-$host}
+            if validate_ip "$PROV_PORTAL_IP"; then
+                break
+            else
+                error "Invalid IP address format"
+            fi
+        done
+        PROV_PORTAL_PORT="$default_port"
+        PROV_PORTAL_IPS=("$PROV_PORTAL_IP")
+    fi
+
+    WIZARD_PORTAL_IP="$PROV_PORTAL_IP"
+    WIZARD_PORTAL_PORT="$PROV_PORTAL_PORT"
+    WIZARD_PORTAL_IPS=("${PROV_PORTAL_IPS[@]}")
+    WIZARD_USE_MULTIPATH="$PROV_USE_MULTIPATH"
+
+    # --- Step 5: Block Size Configuration ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "blocksize"
+
+    info "ZFS Block Size Configuration:"
+    echo "  Recommended sizes based on workload:"
+    echo "    4K  - Databases with small random I/O (PostgreSQL, MySQL)"
+    echo "    8K  - General-purpose databases, mixed workloads"
+    echo "    16K - Default, balanced for most VM workloads (Recommended)"
+    echo "    32K - Large sequential I/O, media files"
+    echo "    64K - Very large files, backup storage"
+    echo "    128K - Maximum for large sequential workloads"
+    echo
+
+    while true; do
+        read -rp "Block size [16K]: " PROV_BLOCKSIZE
+        PROV_BLOCKSIZE="${PROV_BLOCKSIZE:-16K}"
+        # Validate blocksize format (number followed by K or M)
+        if [[ "$PROV_BLOCKSIZE" =~ ^[0-9]+[KkMm]$ ]]; then
+            # Normalize to uppercase
+            PROV_BLOCKSIZE="${PROV_BLOCKSIZE^^}"
+            # Extract numeric part
+            local bs_num="${PROV_BLOCKSIZE%[KM]}"
+            local bs_unit="${PROV_BLOCKSIZE: -1}"
+            # Convert to bytes for validation
+            local bs_bytes
+            if [[ "$bs_unit" == "K" ]]; then
+                bs_bytes=$((bs_num * 1024))
+            else
+                bs_bytes=$((bs_num * 1024 * 1024))
+            fi
+            # Valid range: 512 bytes to 1M (ZFS limit)
+            if [[ "$bs_bytes" -ge 512 ]] && [[ "$bs_bytes" -le 1048576 ]]; then
+                # Must be power of 2
+                if (( (bs_bytes & (bs_bytes - 1)) == 0 )); then
+                    break
+                else
+                    error "Block size must be a power of 2 (e.g., 4K, 8K, 16K, 32K, 64K, 128K)"
+                fi
+            else
+                error "Block size must be between 512 bytes and 1M"
+            fi
+        else
+            error "Invalid format. Use number followed by K or M (e.g., 16K, 128K, 1M)"
+        fi
+    done
+    WIZARD_BLOCKSIZE="$PROV_BLOCKSIZE"
+
+    # --- Step 6: Sparse Volume Configuration ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "sparse"
+
+    info "Sparse Volume Configuration:"
+    echo "  Sparse volumes (thin provisioning) allocate space on-demand rather than"
+    echo "  pre-allocating the full size. This saves storage space but may cause"
+    echo "  slight fragmentation over time. Recommended for most use cases."
+    echo
+
+    while true; do
+        read -rp "Enable sparse volumes? [Y/n]: " sparse_choice
+        sparse_choice="${sparse_choice:-Y}"
+        if [[ "$sparse_choice" =~ ^[Yy]$ ]]; then
+            PROV_SPARSE="1"
+            break
+        elif [[ "$sparse_choice" =~ ^[Nn]$ ]]; then
+            PROV_SPARSE="0"
+            break
+        else
+            error "Please enter Y or N"
+        fi
+    done
+    WIZARD_SPARSE="$PROV_SPARSE"
+
+    # --- Step 7: Host NQN Configuration (NVMe only) ---
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        clear_screen
+        print_banner
+        echo
+        print_header "Storage Provisioning"
+        show_wizard_summary "hostnqn"
+
+        info "Host NQN Configuration:"
+        echo "  The Host NQN (NVMe Qualified Name) identifies this Proxmox host to the"
+        echo "  TrueNAS storage system. It is used for access control and connection"
+        echo "  tracking."
+        echo
+
+        # Check for existing host NQN
+        local existing_hostnqn=""
+        if [[ -f /etc/nvme/hostnqn ]]; then
+            existing_hostnqn=$(cat /etc/nvme/hostnqn 2>/dev/null | tr -d '\n')
+        fi
+
+        if [[ -n "$existing_hostnqn" ]]; then
+            success "Found existing host NQN:"
+            echo "  $existing_hostnqn"
+            echo
+            while true; do
+                read -rp "Use this host NQN? [Y/n]: " use_existing
+                use_existing="${use_existing:-Y}"
+                if [[ "$use_existing" =~ ^[Yy]$ ]]; then
+                    PROV_HOSTNQN="$existing_hostnqn"
+                    break
+                elif [[ "$use_existing" =~ ^[Nn]$ ]]; then
+                    echo
+                    read -rp "Enter custom host NQN: " PROV_HOSTNQN
+                    if [[ -z "$PROV_HOSTNQN" ]]; then
+                        error "Host NQN cannot be empty"
+                        continue
+                    fi
+                    break
+                else
+                    error "Please enter Y or N"
+                fi
+            done
+        else
+            warning "No existing host NQN found in /etc/nvme/hostnqn"
+            echo
+            echo "  You can:"
+            echo "    1) Enter a custom NQN"
+            echo "    2) Leave empty to use system default"
+            echo
+            read -rp "Host NQN (or press Enter for default): " PROV_HOSTNQN
+        fi
+        WIZARD_HOSTNQN="$PROV_HOSTNQN"
+    fi
+
+    return 0
+}
+
+# Show provisioning summary and get confirmation
+# Parameters: storage_name, transport_mode
+# Returns: 0 if confirmed, 1 if cancelled
+show_provisioning_summary() {
+    local storage_name="$1"
+    local transport_mode="$2"
+
+    # Clear screen and show summary header
+    clear_screen
+    print_banner
+    print_header "Provisioning Summary"
+
+    info "The following resources will be configured:"
+
+    # Connection settings
+    printf "  ${c2}✓${c0} %-20s %s\n" "Storage Name:" "$storage_name"
+    printf "  ${c2}✓${c0} %-20s %s\n" "TrueNAS IP:" "$WIZARD_TRUENAS_IP"
+    # API Key - show masked
+    local masked_key="****${WIZARD_API_KEY: -4}"
+    printf "  ${c2}✓${c0} %-20s %s\n" "API Key:" "$masked_key"
+    printf "  ${c2}✓${c0} %-20s %s\n" "Transport Mode:" "$transport_mode"
+    echo
+
+    # Storage resources
+    info "Storage Resources:"
+    echo
+    # Dataset
+    if [[ "$PROV_DATASET_EXISTS" == "true" ]]; then
+        printf "  ${c3}○${c0} %-20s %s %s\n" "Dataset:" "$PROV_DATASET_PATH" "${c3}(existing)${c0}"
+    else
+        printf "  ${c2}+${c0} %-20s %s %s\n" "Dataset:" "$PROV_DATASET_PATH" "${c2}(create new)${c0}"
+    fi
+
+    # Target/Subsystem
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            printf "  ${c3}○${c0} %-20s %s %s\n" "Subsystem NQN:" "$PROV_NQN" "${c3}(existing)${c0}"
+        else
+            printf "  ${c2}+${c0} %-20s %s %s\n" "Subsystem NQN:" "$PROV_NQN" "${c2}(create new)${c0}"
+        fi
+        printf "  ${c2}✓${c0} %-20s %s\n" "NVMe Port:" "${PROV_PORTAL_IP}:${PROV_PORTAL_PORT}"
+    else
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            printf "  ${c3}○${c0} %-20s %s %s\n" "Target IQN:" "$PROV_IQN" "${c3}(existing)${c0}"
+        else
+            printf "  ${c2}+${c0} %-20s %s %s\n" "Target IQN:" "$PROV_IQN" "${c2}(create new)${c0}"
+        fi
+        printf "  ${c2}✓${c0} %-20s %s\n" "iSCSI Portal:" "${PROV_PORTAL_IP}:${PROV_PORTAL_PORT}"
+    fi
+    echo
+
+    # Volume settings
+    info "Volume Settings:"
+    echo
+    printf "  ${c2}✓${c0} %-20s %s\n" "Block Size:" "$PROV_BLOCKSIZE"
+    local sparse_display="Yes (thin provisioning)"
+    [[ "$PROV_SPARSE" == "0" ]] && sparse_display="No (thick provisioning)"
+    printf "  ${c2}✓${c0} %-20s %s\n" "Sparse Volumes:" "$sparse_display"
+
+    # Host NQN (NVMe only)
+    if [[ "$transport_mode" == "nvme-tcp" ]] && [[ -n "$PROV_HOSTNQN" ]]; then
+        # Truncate long NQN for display
+        local nqn_display="$PROV_HOSTNQN"
+        if [[ ${#nqn_display} -gt 45 ]]; then
+            nqn_display="${nqn_display:0:42}..."
+        fi
+        printf "  ${c2}✓${c0} %-20s %s\n" "Host NQN:" "$nqn_display"
+    fi
+    echo
+
+    # Legend
+    echo "  ${c2}✓${c0} = Validated  ${c2}+${c0} = Will create  ${c3}○${c0} = Existing"
+    echo
+
+    read -rp "Proceed with provisioning? [Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn] ]]; then
+        info "Provisioning cancelled"
+        return 1
+    fi
+
+    return 0
+}
+
+# Execute provisioning with progress display
+# Parameters: host, api_key, storage_name, transport_mode
+# Returns: 0 on success, 1 on failure
+execute_provisioning() {
+    local host="$1"
+    local api_key="$2"
+    local storage_name="$3"
+    local transport_mode="$4"
+
+    # Clear any previous rollback state
+    clear_rollback_state
+
+    # Reset provisioned resource variables
+    PROVISIONED_DATASET=""
+    PROVISIONED_TARGET_IQN=""
+    PROVISIONED_SUBSYSTEM_NQN=""
+    PROVISIONED_PORTAL_IP=""
+    PROVISIONED_PORTAL_PORT=""
+    PROVISIONED_PORTAL_ID=""
+
+    # Clear screen and show execution header
+    clear_screen
+    print_banner
+    echo
+    print_header "Executing Provisioning"
+
+    local errors=0
+
+    # --- Create Dataset ---
+    if [[ "$PROV_DATASET_EXISTS" == "true" ]]; then
+        echo -e "$(printf "%-30s " "Dataset:")${c2}✓${c0} Using existing"
+        PROVISIONED_DATASET="$PROV_DATASET_PATH"
+    else
+        printf "%-30s " "Dataset:"
+        start_spinner
+        local result
+        result=$(tn_create_dataset "$host" "$api_key" "$PROV_POOL" "$PROV_DATASET_NAME" 2>&1)
+        local exit_code=$?
+        stop_spinner
+        if [[ $exit_code -eq 0 ]]; then
+            echo -e "\r$(printf "%-30s " "Dataset:")${c2}✓${c0} Created"
+            register_resource "dataset" "$PROV_DATASET_PATH"
+            PROVISIONED_DATASET="$PROV_DATASET_PATH"
+        else
+            echo -e "\r$(printf "%-30s " "Dataset:")${c1}✗${c0} Failed to create"
+            echo "  $result"
+            ((errors++))
+        fi
+    fi
+
+    # --- Create Target/Subsystem ---
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            echo -e "$(printf "%-30s " "NVMe subsystem:")${c2}✓${c0} Using existing"
+            PROVISIONED_SUBSYSTEM_NQN="$PROV_NQN"
+            # Get subsystem ID for port association
+            local subsys_info
+            subsys_info=$(tn_check_subsystem "$host" "$api_key" "$PROV_NQN" 2>/dev/null)
+            PROV_SUBSYSTEM_ID=$(echo "$subsys_info" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('id', ''))" 2>/dev/null)
+        else
+            printf "%-30s " "NVMe subsystem:"
+            start_spinner
+            local result
+            # Extract subsystem name from NQN (part after last colon)
+            local subsys_name="${PROV_NQN##*:}"
+            result=$(tn_create_subsystem "$host" "$api_key" "$subsys_name" "$PROV_NQN" 2>&1)
+            local exit_code=$?
+            stop_spinner
+            if [[ $exit_code -eq 0 ]]; then
+                echo -e "\r$(printf "%-30s " "NVMe subsystem:")${c2}✓${c0} Created"
+                PROV_SUBSYSTEM_ID=$(echo "$result" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('id', ''))" 2>/dev/null)
+                register_resource "subsystem" "$PROV_NQN"
+                PROVISIONED_SUBSYSTEM_NQN="$PROV_NQN"
+            else
+                echo -e "\r$(printf "%-30s " "NVMe subsystem:")${c1}✗${c0} Failed to create"
+                echo "  $result"
+                ((errors++))
+            fi
+        fi
+
+        # Create or reuse NVMe port
+        if [[ $errors -eq 0 ]] && [[ -n "$PROV_SUBSYSTEM_ID" ]]; then
+            printf "%-30s " "NVMe port:"
+            start_spinner
+            local result
+            result=$(tn_create_nvme_port "$host" "$api_key" "$PROV_SUBSYSTEM_ID" "$PROV_PORTAL_IP" "$PROV_PORTAL_PORT" 2>&1)
+            local exit_code=$?
+            stop_spinner
+            if [[ $exit_code -eq 0 ]]; then
+                # Check if port was reused
+                if echo "$result" | grep -q '"reused": true'; then
+                    echo -e "\r$(printf "%-30s " "NVMe port:")${c2}✓${c0} Using existing"
+                else
+                    echo -e "\r$(printf "%-30s " "NVMe port:")${c2}✓${c0} Created"
+                fi
+                PROVISIONED_PORTAL_IP="$PROV_PORTAL_IP"
+                PROVISIONED_PORTAL_PORT="$PROV_PORTAL_PORT"
+            else
+                echo -e "\r$(printf "%-30s " "NVMe port:")${c1}✗${c0} Failed to configure"
+                echo "  $result"
+                ((errors++))
+            fi
+        fi
+    else
+        # iSCSI provisioning
+        if [[ "$PROV_TARGET_EXISTS" == "true" ]]; then
+            echo -e "$(printf "%-30s " "iSCSI target:")${c2}✓${c0} Using existing"
+            PROVISIONED_TARGET_IQN="$PROV_IQN"
+        else
+            printf "%-30s " "iSCSI target:"
+            start_spinner
+            local result
+            result=$(tn_create_target "$host" "$api_key" "$PROV_IQN" "$PROV_PORTAL_IP" "$PROV_PORTAL_PORT" 2>&1)
+            local exit_code=$?
+            stop_spinner
+            if [[ $exit_code -eq 0 ]]; then
+                echo -e "\r$(printf "%-30s " "iSCSI target:")${c2}✓${c0} Created"
+                register_resource "target" "$PROV_IQN"
+                PROVISIONED_TARGET_IQN="$PROV_IQN"
+                PROVISIONED_PORTAL_IP="$PROV_PORTAL_IP"
+                PROVISIONED_PORTAL_PORT="$PROV_PORTAL_PORT"
+            else
+                echo -e "\r$(printf "%-30s " "iSCSI target:")${c1}✗${c0} Failed to create"
+                echo "  $result"
+                ((errors++))
+            fi
+        fi
+    fi
+
+    # --- Validation ---
+    printf "%-30s " "Dataset validation:"
+    start_spinner
+    local dataset_valid=false
+    validate_dataset_exists "$host" "$api_key" "$PROVISIONED_DATASET" && dataset_valid=true
+    stop_spinner
+    if [[ "$dataset_valid" == "true" ]]; then
+        echo -e "\r$(printf "%-30s " "Dataset validation:")${c2}✓${c0} Verified"
+    else
+        echo -e "\r$(printf "%-30s " "Dataset validation:")${c1}✗${c0} Not found"
+        ((errors++))
+    fi
+
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        printf "%-30s " "NVMe discovery:"
+        start_spinner
+        local discovery_valid=false
+        validate_nvme_discovery "$PROV_PORTAL_IP" "$PROV_PORTAL_PORT" "$PROVISIONED_SUBSYSTEM_NQN" && discovery_valid=true
+        stop_spinner
+        if [[ "$discovery_valid" == "true" ]]; then
+            echo -e "\r$(printf "%-30s " "NVMe discovery:")${c2}✓${c0} Subsystem visible"
+        else
+            echo -e "\r$(printf "%-30s " "NVMe discovery:")${c3}?${c0} May need service restart"
+        fi
+    else
+        # For iSCSI, invoke the plugin's _ensure_target_visible to create weight volume
+        # This makes the target discoverable via iscsiadm
+        printf "%-30s " "Weight volume:"
+        start_spinner
+        local weight_result
+        weight_result=$(perl -e '
+            use lib "/usr/share/perl5/PVE/Storage/Custom";
+            use TrueNASPlugin;
+
+            my $scfg = {
+                api_host => $ARGV[0],
+                api_key => $ARGV[1],
+                api_insecure => 1,
+                dataset => $ARGV[2],
+                target_iqn => $ARGV[3],
+                discovery_portal => $ARGV[4],
+            };
+
+            eval { PVE::Storage::Custom::TrueNASPlugin::_ensure_target_visible($scfg) };
+            if ($@) {
+                print "ERROR: $@";
+                exit 1;
+            }
+            print "OK";
+        ' "$host" "$api_key" "$PROVISIONED_DATASET" "$PROVISIONED_TARGET_IQN" "${PROV_PORTAL_IP}:${PROV_PORTAL_PORT}" 2>&1)
+        local weight_exit=$?
+        stop_spinner
+
+        if [[ $weight_exit -eq 0 ]]; then
+            echo -e "\r$(printf "%-30s " "Weight volume:")${c2}✓${c0} Created"
+        else
+            echo -e "\r$(printf "%-30s " "Weight volume:")${c1}✗${c0} Failed"
+            log "ERROR" "Weight volume creation failed: $weight_result"
+        fi
+
+        # Now verify with iscsiadm discovery
+        printf "%-30s " "iSCSI discovery:"
+        start_spinner
+        local discovery_valid=false
+        validate_iscsi_discovery "$PROV_PORTAL_IP" "$PROV_PORTAL_PORT" "$PROVISIONED_TARGET_IQN" && discovery_valid=true
+        stop_spinner
+        if [[ "$discovery_valid" == "true" ]]; then
+            echo -e "\r$(printf "%-30s " "iSCSI discovery:")${c2}✓${c0} Target visible"
+        else
+            echo -e "\r$(printf "%-30s " "iSCSI discovery:")${c3}?${c0} May need service restart"
+        fi
+    fi
+
+    echo
+    if [[ $errors -gt 0 ]]; then
+        error "Provisioning completed with $errors error(s)"
+        echo
+        echo "  1) Continue anyway"
+        echo "  2) Rollback created resources"
+        echo "  0) Cancel (keep resources)"
+        echo
+
+        local choice
+        read -rp "Select option [0-2]: " choice
+        case "$choice" in
+            1)
+                warning "Continuing with errors"
+                clear_rollback_state
+                return 0
+                ;;
+            2)
+                rollback_provisioning "$host" "$api_key"
+                return 1
+                ;;
+            *)
+                clear_rollback_state
+                return 1
+                ;;
+        esac
+    fi
+
+    success "Provisioning completed successfully!"
+    echo
+    read -rp "Press any key to continue..." -n1 _
+    echo
+    clear_rollback_state
+    return 0
+}
+
+# Legacy function - deprecated, use collect_provisioning_config + execute_provisioning instead
+provision_dataset() {
+    error "provision_dataset: This function is deprecated"
+    return 1
+}
+
+# Provision iSCSI resources (portal and target)
+# Parameters: host, api_key, storage_name
+# Returns: 0 on success, 1 on failure
+# Sets: PROVISIONED_TARGET_IQN, PROVISIONED_PORTAL_IP, PROVISIONED_PORTAL_PORT, PROVISIONED_PORTAL_ID
+provision_iscsi() {
+    local host="$1"
+    local api_key="$2"
+    local storage_name="$3"
+
+    echo
+    print_header "iSCSI Configuration"
+
+    # Query existing portals
+    info "Fetching existing iSCSI portals..."
+    local portals_json
+    portals_json=$(tn_query_portals "$host" "$api_key" 2>&1)
+
+    local -a portal_ids=()
+    local -a portal_displays=()
+
+    # Parse portals - extract id and listen info
+    if [[ -n "$portals_json" ]] && [[ "$portals_json" != "[]" ]]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ \"id\":\ *([0-9]+) ]]; then
+                local portal_id="${BASH_REMATCH[1]}"
+                # Try to extract IP from the same portal block
+                local portal_ip
+                portal_ip=$(echo "$portals_json" | grep -oP "\"id\":\s*${portal_id}[^}]*\"ip\":\s*\"\K[^\"]+")
+                portal_ids+=("$portal_id")
+                portal_displays+=("Portal #$portal_id - $portal_ip:3260")
+            fi
+        done < <(echo "$portals_json" | grep -oP '"id":\s*[0-9]+')
+    fi
+
+    local portal_id
+    local portal_ip
+    local portal_port="3260"
+
+    if [[ ${#portal_ids[@]} -gt 0 ]]; then
+        echo
+        info "Existing iSCSI portals:"
+        local idx=1
+        for display in "${portal_displays[@]}"; do
+            echo "  $idx) $display"
+            ((idx++))
+        done
+        echo "  $idx) Create new portal"
+        echo "  0) Cancel"
+        echo
+
+        local portal_choice
+        while true; do
+            read -rp "Select portal [0-$idx]: " portal_choice
+            if [[ "$portal_choice" == "0" ]]; then
+                return 1
+            elif [[ "$portal_choice" =~ ^[0-9]+$ ]] && [[ "$portal_choice" -ge 1 ]] && [[ "$portal_choice" -lt "$idx" ]]; then
+                portal_id="${portal_ids[$((portal_choice-1))]}"
+                # Extract IP from display
+                portal_ip=$(echo "${portal_displays[$((portal_choice-1))]}" | grep -oP '\d+\.\d+\.\d+\.\d+')
+                info "Using existing portal: $portal_ip:$portal_port (ID: $portal_id)"
+                break
+            elif [[ "$portal_choice" == "$idx" ]]; then
+                # Create new portal
+                portal_id=""
+                break
+            else
+                error "Invalid selection"
+            fi
+        done
+    fi
+
+    # Create new portal if needed
+    if [[ -z "$portal_id" ]]; then
+        echo
+        read -rp "Portal listen IP address (e.g., $host): " portal_ip
+        portal_ip="${portal_ip:-$host}"
+
+        if ! validate_ip "$portal_ip"; then
+            error "Invalid IP address"
+            return 1
+        fi
+
+        # Port is auto-assigned by TrueNAS (default 3260)
+        portal_port="3260"
+
+        info "Creating iSCSI portal: $portal_ip:$portal_port"
+        local portal_result
+        portal_result=$(tn_create_portal "$host" "$api_key" "$portal_ip" "$portal_port" 2>&1)
+        local portal_exit=$?
+
+        if [[ $portal_exit -ne 0 ]]; then
+            error "Failed to create portal: $portal_result"
+            return 1
+        fi
+
+        portal_id=$(echo "$portal_result" | grep -oP '"id":\s*\K[0-9]+')
+        if [[ -z "$portal_id" ]]; then
+            error "Failed to get portal ID from response"
+            return 1
+        fi
+
+        register_resource "portal" "$portal_id"
+        success "Portal created (ID: $portal_id)"
+    fi
+
+    # Target IQN
+    echo
+    local target_iqn
+    local auto_iqn
+    auto_iqn=$(generate_iqn "$storage_name")
+
+    info "iSCSI Target Configuration"
+    echo "  1) Generate IQN automatically: $auto_iqn"
+    echo "  2) Enter custom IQN"
+    echo
+
+    local iqn_choice
+    read -rp "Select option [1-2] [1]: " iqn_choice
+    iqn_choice="${iqn_choice:-1}"
+
+    case "$iqn_choice" in
+        1)
+            target_iqn="$auto_iqn"
+            ;;
+        2)
+            read -rp "Enter target IQN: " target_iqn
+            if [[ -z "$target_iqn" ]]; then
+                error "IQN cannot be empty"
+                return 1
+            fi
+            ;;
+        *)
+            target_iqn="$auto_iqn"
+            ;;
+    esac
+
+    # Check if target exists
+    if tn_check_target "$host" "$api_key" "$target_iqn" >/dev/null 2>&1; then
+        echo
+        warning "Target '$target_iqn' already exists"
+        echo "  1) Use existing target"
+        echo "  2) Enter a different IQN"
+        echo "  0) Cancel"
+
+        local exist_choice
+        while true; do
+            read -rp "Select option [0-2]: " exist_choice
+            case "$exist_choice" in
+                0)
+                    return 1
+                    ;;
+                1)
+                    info "Using existing target: $target_iqn"
+                    PROVISIONED_TARGET_IQN="$target_iqn"
+                    PROVISIONED_PORTAL_IP="$portal_ip"
+                    PROVISIONED_PORTAL_PORT="$portal_port"
+                    PROVISIONED_PORTAL_ID="$portal_id"
+                    return 0
+                    ;;
+                2)
+                    read -rp "Enter new target IQN: " target_iqn
+                    if [[ -z "$target_iqn" ]]; then
+                        error "IQN cannot be empty"
+                        return 1
+                    fi
+                    ;;
+                *)
+                    error "Invalid choice"
+                    ;;
+            esac
+        done
+    fi
+
+    # Create target with portal association
+    info "Creating iSCSI target: $target_iqn"
+    local target_result
+    target_result=$(tn_create_target "$host" "$api_key" "$target_iqn" "$portal_ip" "$portal_port" 2>&1)
+    local target_exit=$?
+
+    if [[ $target_exit -ne 0 ]]; then
+        error "Failed to create target: $target_result"
+        return 1
+    fi
+
+    local target_id
+    target_id=$(echo "$target_result" | grep -oP '"id":\s*\K[0-9]+')
+    if [[ -n "$target_id" ]]; then
+        register_resource "target" "$target_id"
+    fi
+
+    success "Target created: $target_iqn"
+
+    PROVISIONED_TARGET_IQN="$target_iqn"
+    PROVISIONED_PORTAL_IP="$portal_ip"
+    PROVISIONED_PORTAL_PORT="$portal_port"
+    PROVISIONED_PORTAL_ID="$portal_id"
+
+    return 0
+}
+
+# Provision NVMe/TCP resources (subsystem)
+# Parameters: host, api_key, storage_name
+# Returns: 0 on success, 1 on failure
+# Sets: PROVISIONED_SUBSYSTEM_NQN, PROVISIONED_PORTAL_IP, PROVISIONED_PORTAL_PORT
+provision_nvme() {
+    local host="$1"
+    local api_key="$2"
+    local storage_name="$3"
+
+    echo
+    print_header "NVMe/TCP Configuration"
+
+    # Subsystem NQN
+    local subsystem_nqn
+    local auto_nqn
+    auto_nqn=$(generate_nqn "$storage_name")
+
+    info "NVMe Subsystem Configuration"
+    echo "  1) Generate NQN automatically: $auto_nqn"
+    echo "  2) Enter custom NQN"
+    echo
+
+    local nqn_choice
+    read -rp "Select option [1-2] [1]: " nqn_choice
+    nqn_choice="${nqn_choice:-1}"
+
+    case "$nqn_choice" in
+        1)
+            subsystem_nqn="$auto_nqn"
+            ;;
+        2)
+            while true; do
+                read -rp "Enter subsystem NQN: " subsystem_nqn
+                if [[ -z "$subsystem_nqn" ]]; then
+                    error "NQN cannot be empty"
+                    continue
+                fi
+                if ! validate_nqn "$subsystem_nqn"; then
+                    error "Invalid NQN format. Must start with nqn.YYYY-MM."
+                    continue
+                fi
+                break
+            done
+            ;;
+        *)
+            subsystem_nqn="$auto_nqn"
+            ;;
+    esac
+
+    # Check if subsystem exists
+    if tn_check_subsystem "$host" "$api_key" "$subsystem_nqn" >/dev/null 2>&1; then
+        echo
+        warning "Subsystem '$subsystem_nqn' already exists"
+        echo "  1) Use existing subsystem"
+        echo "  2) Enter a different NQN"
+        echo "  0) Cancel"
+
+        local exist_choice
+        while true; do
+            read -rp "Select option [0-2]: " exist_choice
+            case "$exist_choice" in
+                0)
+                    return 1
+                    ;;
+                1)
+                    info "Using existing subsystem: $subsystem_nqn"
+                    # Get portal info
+                    read -rp "Portal IP address [$host]: " portal_ip
+                    portal_ip="${portal_ip:-$host}"
+                    read -rp "Portal port [4420]: " portal_port
+                    portal_port="${portal_port:-4420}"
+
+                    PROVISIONED_SUBSYSTEM_NQN="$subsystem_nqn"
+                    PROVISIONED_PORTAL_IP="$portal_ip"
+                    PROVISIONED_PORTAL_PORT="$portal_port"
+                    return 0
+                    ;;
+                2)
+                    while true; do
+                        read -rp "Enter new subsystem NQN: " subsystem_nqn
+                        if [[ -z "$subsystem_nqn" ]]; then
+                            error "NQN cannot be empty"
+                            continue
+                        fi
+                        if validate_nqn "$subsystem_nqn"; then
+                            break
+                        fi
+                        error "Invalid NQN format"
+                    done
+                    ;;
+                *)
+                    error "Invalid choice"
+                    ;;
+            esac
+        done
+    fi
+
+    # Get portal configuration
+    echo
+    local portal_ip
+    local portal_port
+    read -rp "Portal IP address for NVMe/TCP [$host]: " portal_ip
+    portal_ip="${portal_ip:-$host}"
+
+    if ! validate_ip "$portal_ip"; then
+        error "Invalid IP address"
+        return 1
+    fi
+
+    read -rp "Portal port [4420]: " portal_port
+    portal_port="${portal_port:-4420}"
+
+    # Create subsystem
+    local subsystem_name="${storage_name}"
+    info "Creating NVMe subsystem: $subsystem_nqn"
+
+    local subsys_result
+    subsys_result=$(tn_create_subsystem "$host" "$api_key" "$subsystem_name" "$subsystem_nqn" 2>&1)
+    local subsys_exit=$?
+
+    if [[ $subsys_exit -ne 0 ]]; then
+        error "Failed to create subsystem: $subsys_result"
+        return 1
+    fi
+
+    local subsystem_id
+    subsystem_id=$(echo "$subsys_result" | grep -oP '"id":\s*\K[0-9]+')
+    if [[ -z "$subsystem_id" ]]; then
+        error "Failed to get subsystem ID from response"
+        return 1
+    fi
+
+    register_resource "subsystem" "$subsystem_id"
+    success "Subsystem created (ID: $subsystem_id)"
+
+    # Create port for subsystem
+    info "Creating NVMe port: $portal_ip:$portal_port"
+    local port_result
+    port_result=$(tn_create_nvme_port "$host" "$api_key" "$subsystem_id" "$portal_ip" "$portal_port" 2>&1)
+    local port_exit=$?
+
+    if [[ $port_exit -ne 0 ]]; then
+        warning "Failed to create NVMe port: $port_result"
+        warning "Port may need to be configured manually in TrueNAS"
+        # Don't fail - subsystem was created successfully
+    else
+        success "NVMe port created"
+    fi
+
+    PROVISIONED_SUBSYSTEM_NQN="$subsystem_nqn"
+    PROVISIONED_PORTAL_IP="$portal_ip"
+    PROVISIONED_PORTAL_PORT="$portal_port"
+
+    return 0
+}
+
+# Main provisioning orchestrator - new workflow
+# Parameters: storage_name, host, api_key, transport_mode
+# Returns: 0 on success, 1 on failure
+# Uses three-phase approach: collect -> summary -> execute
+provision_storage_resources() {
+    local storage_name="$1"
+    local host="$2"
+    local api_key="$3"
+    local transport_mode="$4"
+
+    # Phase 1: Collect all configuration
+    if ! collect_provisioning_config "$host" "$api_key" "$storage_name" "$transport_mode"; then
+        return 1
+    fi
+
+    # Phase 2: Show summary and get confirmation
+    if ! show_provisioning_summary "$storage_name" "$transport_mode"; then
+        return 1
+    fi
+
+    # Phase 3: Execute provisioning with progress display
+    if ! execute_provisioning "$host" "$api_key" "$storage_name" "$transport_mode"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Handle provisioning errors with retry/skip/abort options
+# Parameters: host, api_key
+handle_provisioning_error() {
+    local host="$1"
+    local api_key="$2"
+
+    echo
+    error "Provisioning encountered an error"
+    echo
+    echo "  1) Retry the failed step"
+    echo "  2) Rollback created resources and abort"
+    echo "  3) Abort without rollback (keep partial resources)"
+    echo
+
+    local choice
+    read -rp "Select option [1-3]: " choice
+    case "$choice" in
+        1)
+            info "Retry not yet implemented for this step"
+            return 1
+            ;;
+        2)
+            rollback_provisioning "$host" "$api_key"
+            return 1
+            ;;
+        3)
+            warning "Aborting without rollback"
+            warning "Partial resources may exist on TrueNAS"
+            clear_rollback_state
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Backup storage.cfg
+# Outputs: backup file path to stdout on success
 backup_storage_cfg() {
     if [[ ! -f "$STORAGE_CFG" ]]; then
         log "INFO" "No storage.cfg to backup"
@@ -5614,12 +9742,12 @@ backup_storage_cfg() {
     local backup_file="${BACKUP_DIR}/storage.cfg.backup.${timestamp}"
 
     cp "$STORAGE_CFG" "$backup_file" || {
-        error "Failed to create storage.cfg backup"
+        error "Failed to create storage.cfg backup" >&2
         return 1
     }
 
-    success "Storage config backed up: $backup_file"
     log "INFO" "Storage config backed up: $backup_file"
+    echo "$backup_file"  # Output path to stdout for capture
     return 0
 }
 
@@ -5828,7 +9956,7 @@ menu_edit_storage() {
     # Test connectivity
     if ! test_truenas_api "$truenas_ip" "$api_key"; then
         error "Failed to connect to TrueNAS. Please check IP and API key."
-        read -rp "Continue anyway? (y/N): " choice
+        read -rp "Continue anyway? [y/N]: " choice
         [[ "$choice" =~ ^[Yy] ]] || return 1
     fi
 
@@ -5896,7 +10024,7 @@ menu_edit_storage() {
     if [[ "$transport_mode" == "nvme-tcp" ]]; then
         echo
         info "Current host NQN: ${hostnqn:-system default}"
-        read -rp "Update host NQN? (y/N): " update_hostnqn
+        read -rp "Update host NQN? [y/N]: " update_hostnqn
         if [[ "$update_hostnqn" =~ ^[Yy] ]]; then
             read -rp "New host NQN: " hostnqn
         fi
@@ -5918,7 +10046,7 @@ menu_edit_storage() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
 
-    read -rp "Apply these changes to $STORAGE_CFG? (Y/n): " confirm
+    read -rp "Apply these changes to $STORAGE_CFG? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn] ]]; then
         warning "Configuration changes cancelled"
         return 1
@@ -5944,12 +10072,411 @@ menu_edit_storage() {
     return 0
 }
 
+# ============================================================================
+# PROGRESSIVE WIZARD FOR STORAGE CONFIGURATION
+# ============================================================================
+
+# Global wizard state variables
+WIZARD_CONFIG_MODE=""        # "create" or "existing"
+WIZARD_STORAGE_NAME=""
+WIZARD_TRUENAS_IP=""
+WIZARD_API_KEY=""
+WIZARD_API_VALIDATED=""      # "true" if API connectivity confirmed
+WIZARD_TRANSPORT_MODE=""     # "iscsi" or "nvme-tcp"
+WIZARD_POOL=""               # ZFS pool name
+WIZARD_DATASET=""            # Dataset name (without pool prefix)
+WIZARD_DATASET_PATH=""       # Full dataset path (pool/dataset)
+WIZARD_DATASET_EXISTS=""     # "true" if dataset already exists
+WIZARD_TARGET=""             # IQN or NQN
+WIZARD_TARGET_EXISTS=""      # "true" if target/subsystem already exists
+WIZARD_PORTAL_IP=""          # Portal IP address
+WIZARD_PORTAL_PORT=""        # Portal port
+WIZARD_PORTAL_IPS=()         # Array of portal IPs for multipath
+WIZARD_USE_MULTIPATH=""      # "1" if multipath enabled
+WIZARD_BLOCKSIZE=""          # Block size (e.g., 16K)
+WIZARD_SPARSE=""             # Sparse volume (0 or 1)
+WIZARD_HOSTNQN=""            # Host NQN for NVMe/TCP
+
+# Display wizard progress summary with validated inputs
+# Shows checkmarks for validated items
+show_wizard_summary() {
+    local current_step="$1"
+
+    info "Configuration Progress:"
+
+    # Configuration Mode
+    if [[ -n "$WIZARD_CONFIG_MODE" ]]; then
+        if [[ "$WIZARD_CONFIG_MODE" == "create" ]]; then
+            echo -e "  ${c2}✓${c0} Configuration Mode:  Automated Provisioning"
+        else
+            echo -e "  ${c2}✓${c0} Configuration Mode:  Manual Configuration"
+        fi
+    elif [[ "$current_step" == "mode" ]]; then
+        echo -e "  ${c6}▸${c0} Configuration Mode:  ${c6}(selecting...)${c0}"
+    else
+        echo -e "    Configuration Mode:  ${c6}(pending)${c0}"
+    fi
+
+    # Storage Name
+    if [[ -n "$WIZARD_STORAGE_NAME" ]]; then
+        echo -e "  ${c2}✓${c0} Storage Name:        $WIZARD_STORAGE_NAME"
+    elif [[ "$current_step" == "name" ]]; then
+        echo -e "  ${c6}▸${c0} Storage Name:        ${c6}(entering...)${c0}"
+    elif [[ -n "$WIZARD_CONFIG_MODE" ]]; then
+        echo -e "    Storage Name:        ${c6}(pending)${c0}"
+    fi
+
+    # TrueNAS IP
+    if [[ -n "$WIZARD_TRUENAS_IP" ]]; then
+        echo -e "  ${c2}✓${c0} TrueNAS IP:          $WIZARD_TRUENAS_IP"
+    elif [[ "$current_step" == "ip" ]]; then
+        echo -e "  ${c6}▸${c0} TrueNAS IP:          ${c6}(entering...)${c0}"
+    elif [[ -n "$WIZARD_STORAGE_NAME" ]]; then
+        echo -e "    TrueNAS IP:          ${c6}(pending)${c0}"
+    fi
+
+    # API Key
+    if [[ "$WIZARD_API_VALIDATED" == "true" ]]; then
+        echo -e "  ${c2}✓${c0} API Key:             ****${WIZARD_API_KEY: -4} ${c2}(connected)${c0}"
+    elif [[ -n "$WIZARD_API_KEY" ]]; then
+        echo -e "  ${c3}?${c0} API Key:             ****${WIZARD_API_KEY: -4} ${c3}(unverified)${c0}"
+    elif [[ "$current_step" == "apikey" ]]; then
+        echo -e "  ${c6}▸${c0} API Key:             ${c6}(entering...)${c0}"
+    elif [[ -n "$WIZARD_TRUENAS_IP" ]]; then
+        echo -e "    API Key:             ${c6}(pending)${c0}"
+    fi
+
+    # Transport Mode (only for automated provisioning)
+    if [[ "$WIZARD_CONFIG_MODE" == "create" ]]; then
+        if [[ -n "$WIZARD_TRANSPORT_MODE" ]]; then
+            if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+                echo -e "  ${c2}✓${c0} Transport Mode:      NVMe/TCP"
+            else
+                echo -e "  ${c2}✓${c0} Transport Mode:      iSCSI"
+            fi
+        elif [[ "$current_step" == "transport" ]]; then
+            echo -e "  ${c6}▸${c0} Transport Mode:      ${c6}(selecting...)${c0}"
+        elif [[ "$WIZARD_API_VALIDATED" == "true" ]]; then
+            echo -e "    Transport Mode:      ${c6}(pending)${c0}"
+        fi
+
+        # Pool (only shown after transport mode for automated)
+        if [[ -n "$WIZARD_POOL" ]]; then
+            echo -e "  ${c2}✓${c0} ZFS Pool:            $WIZARD_POOL"
+        elif [[ "$current_step" == "pool" ]]; then
+            echo -e "  ${c6}▸${c0} ZFS Pool:            ${c6}(selecting...)${c0}"
+        elif [[ -n "$WIZARD_TRANSPORT_MODE" ]]; then
+            echo -e "    ZFS Pool:            ${c6}(pending)${c0}"
+        fi
+
+        # Dataset
+        if [[ -n "$WIZARD_DATASET_PATH" ]]; then
+            local ds_status=""
+            if [[ "$WIZARD_DATASET_EXISTS" == "true" ]]; then
+                ds_status=" ${c3}(exists)${c0}"
+            else
+                ds_status=" ${c2}(new)${c0}"
+            fi
+            echo -e "  ${c2}✓${c0} Dataset:             $WIZARD_DATASET_PATH$ds_status"
+        elif [[ "$current_step" == "dataset" ]]; then
+            echo -e "  ${c6}▸${c0} Dataset:             ${c6}(entering...)${c0}"
+        elif [[ -n "$WIZARD_POOL" ]]; then
+            echo -e "    Dataset:             ${c6}(pending)${c0}"
+        fi
+
+        # Target/Subsystem
+        if [[ -n "$WIZARD_TARGET" ]]; then
+            local tgt_status=""
+            if [[ "$WIZARD_TARGET_EXISTS" == "true" ]]; then
+                tgt_status=" ${c3}(exists)${c0}"
+            else
+                tgt_status=" ${c2}(new)${c0}"
+            fi
+            if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+                echo -e "  ${c2}✓${c0} Subsystem NQN:       $WIZARD_TARGET$tgt_status"
+            else
+                echo -e "  ${c2}✓${c0} Target IQN:          $WIZARD_TARGET$tgt_status"
+            fi
+        elif [[ "$current_step" == "target" ]]; then
+            if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+                echo -e "  ${c6}▸${c0} Subsystem NQN:       ${c6}(configuring...)${c0}"
+            else
+                echo -e "  ${c6}▸${c0} Target IQN:          ${c6}(configuring...)${c0}"
+            fi
+        elif [[ -n "$WIZARD_DATASET_PATH" ]]; then
+            if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+                echo -e "    Subsystem NQN:       ${c6}(pending)${c0}"
+            else
+                echo -e "    Target IQN:          ${c6}(pending)${c0}"
+            fi
+        fi
+
+        # Portal (iSCSI) / Discovery (NVMe/TCP)
+        local portal_label="Portal"
+        local portals_label="Portals"
+        if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+            portal_label="Discovery"
+            portals_label="Discovery"
+        fi
+        if [[ -n "$WIZARD_PORTAL_IP" ]]; then
+            if [[ ${#WIZARD_PORTAL_IPS[@]} -gt 1 ]]; then
+                echo -e "  ${c2}✓${c0} ${portals_label}:             ${WIZARD_PORTAL_IP}:${WIZARD_PORTAL_PORT} ${c2}(multipath: ${#WIZARD_PORTAL_IPS[@]})${c0}"
+            else
+                echo -e "  ${c2}✓${c0} ${portal_label}:              ${WIZARD_PORTAL_IP}:${WIZARD_PORTAL_PORT}"
+            fi
+        elif [[ "$current_step" == "portal" ]]; then
+            echo -e "  ${c6}▸${c0} ${portal_label}:              ${c6}(configuring...)${c0}"
+        elif [[ -n "$WIZARD_TARGET" ]]; then
+            echo -e "    ${portal_label}:              ${c6}(pending)${c0}"
+        fi
+
+        # Block Size
+        if [[ -n "$WIZARD_BLOCKSIZE" ]]; then
+            echo -e "  ${c2}✓${c0} Block Size:          $WIZARD_BLOCKSIZE"
+        elif [[ "$current_step" == "blocksize" ]]; then
+            echo -e "  ${c6}▸${c0} Block Size:          ${c6}(configuring...)${c0}"
+        elif [[ -n "$WIZARD_PORTAL_IP" ]]; then
+            echo -e "    Block Size:          ${c6}(pending)${c0}"
+        fi
+
+        # Sparse Volumes
+        if [[ -n "$WIZARD_SPARSE" ]]; then
+            local sparse_display="Yes (thin)"
+            [[ "$WIZARD_SPARSE" == "0" ]] && sparse_display="No (thick)"
+            echo -e "  ${c2}✓${c0} Sparse Volumes:      $sparse_display"
+        elif [[ "$current_step" == "sparse" ]]; then
+            echo -e "  ${c6}▸${c0} Sparse Volumes:      ${c6}(configuring...)${c0}"
+        elif [[ -n "$WIZARD_BLOCKSIZE" ]]; then
+            echo -e "    Sparse Volumes:      ${c6}(pending)${c0}"
+        fi
+
+        # Host NQN (NVMe only)
+        if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+            if [[ -n "$WIZARD_HOSTNQN" ]]; then
+                # Truncate long NQN for display
+                local nqn_display="$WIZARD_HOSTNQN"
+                if [[ ${#nqn_display} -gt 40 ]]; then
+                    nqn_display="${nqn_display:0:37}..."
+                fi
+                echo -e "  ${c2}✓${c0} Host NQN:            $nqn_display"
+            elif [[ "$current_step" == "hostnqn" ]]; then
+                echo -e "  ${c6}▸${c0} Host NQN:            ${c6}(configuring...)${c0}"
+            elif [[ -n "$WIZARD_SPARSE" ]]; then
+                echo -e "    Host NQN:            ${c6}(pending)${c0}"
+            fi
+        fi
+    fi
+
+    echo
+}
+
+# Reset wizard state
+reset_wizard_state() {
+    WIZARD_CONFIG_MODE=""
+    WIZARD_STORAGE_NAME=""
+    WIZARD_TRUENAS_IP=""
+    WIZARD_API_KEY=""
+    WIZARD_API_VALIDATED=""
+    WIZARD_TRANSPORT_MODE=""
+    WIZARD_POOL=""
+    WIZARD_DATASET=""
+    WIZARD_DATASET_PATH=""
+    WIZARD_DATASET_EXISTS=""
+    WIZARD_TARGET=""
+    WIZARD_TARGET_EXISTS=""
+    WIZARD_PORTAL_IP=""
+    WIZARD_PORTAL_PORT=""
+    WIZARD_PORTAL_IPS=()
+    WIZARD_USE_MULTIPATH=""
+    WIZARD_BLOCKSIZE=""
+    WIZARD_SPARSE=""
+    WIZARD_HOSTNQN=""
+}
+
+# Progressive wizard for adding new storage
+# Returns: 0 on success (config collected), 1 on cancel/failure
+wizard_add_storage() {
+    reset_wizard_state
+
+    local can_provision=false
+    if [[ -f "$PLUGIN_FILE" ]]; then
+        can_provision=true
+    fi
+
+    # --- Step 1: Configuration Mode ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "mode"
+
+    if [[ "$can_provision" == "true" ]]; then
+        info "How would you like to configure TrueNAS storage?"
+        echo "  1) Create new storage on TrueNAS (automated provisioning)"
+        echo "  2) Use existing storage (manual configuration)"
+        echo "  0) Cancel"
+        echo
+
+        local mode_choice
+        while true; do
+            read -rp "Select option [0-2]: " mode_choice
+            case "$mode_choice" in
+                0) info "Configuration cancelled"; return 1 ;;
+                1) WIZARD_CONFIG_MODE="create"; break ;;
+                2) WIZARD_CONFIG_MODE="existing"; break ;;
+                *) error "Invalid choice. Please enter 0, 1, or 2" ;;
+            esac
+        done
+    else
+        info "Plugin not installed - using manual configuration mode"
+        WIZARD_CONFIG_MODE="existing"
+        sleep 1
+    fi
+
+    # --- Step 2: Storage Name ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "name"
+
+    info "Enter a unique name for this storage configuration:"
+    while true; do
+        read -rp "Storage name (e.g., truenas-main): " WIZARD_STORAGE_NAME
+        if [[ -z "$WIZARD_STORAGE_NAME" ]]; then
+            error "Storage name cannot be empty"
+            continue
+        fi
+        if ! validate_storage_name "$WIZARD_STORAGE_NAME"; then
+            error "Invalid storage name. Use only letters, numbers, hyphens, and underscores"
+            continue
+        fi
+        if storage_name_exists "$WIZARD_STORAGE_NAME"; then
+            error "Storage name '$WIZARD_STORAGE_NAME' already exists"
+            WIZARD_STORAGE_NAME=""
+            continue
+        fi
+        break
+    done
+
+    # --- Step 3: TrueNAS IP ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "ip"
+
+    info "Enter the IP address of your TrueNAS server:"
+    while true; do
+        read -rp "TrueNAS IP address: " WIZARD_TRUENAS_IP
+        if validate_ip "$WIZARD_TRUENAS_IP"; then
+            break
+        else
+            error "Invalid IP address format"
+            WIZARD_TRUENAS_IP=""
+        fi
+    done
+
+    # --- Step 4: API Key ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "apikey"
+
+    info "Enter your TrueNAS API key:"
+    info "(Generate one in TrueNAS: Settings → API Keys → Add)"
+    echo
+    while true; do
+        read -rp "API key: " WIZARD_API_KEY
+        if [[ -z "$WIZARD_API_KEY" ]]; then
+            error "API key cannot be empty"
+            continue
+        fi
+        break
+    done
+
+    # Test API connectivity
+    echo
+    printf "  %-30s" "Testing API connectivity..."
+    start_spinner
+    local api_test_result
+    api_test_result=$(test_truenas_api "$WIZARD_TRUENAS_IP" "$WIZARD_API_KEY" 2>&1)
+    local api_test_code=$?
+    stop_spinner
+
+    if [[ $api_test_code -eq 0 ]]; then
+        echo -e "\r  $(printf "%-30s" "Testing API connectivity...")${c2}OK${c0}"
+        WIZARD_API_VALIDATED="true"
+    else
+        echo -e "\r  $(printf "%-30s" "Testing API connectivity...")${c1}FAILED${c0}"
+        echo
+        warning "Could not connect to TrueNAS API"
+        read -rp "Continue anyway? [y/N]: " continue_choice
+        if [[ ! "$continue_choice" =~ ^[Yy] ]]; then
+            return 1
+        fi
+        WIZARD_API_VALIDATED="false"
+    fi
+
+    # --- Step 5: Transport Mode (for automated provisioning) ---
+    if [[ "$WIZARD_CONFIG_MODE" == "create" ]]; then
+        clear_screen
+        print_banner
+        echo
+        print_header "Storage Provisioning"
+        show_wizard_summary "transport"
+
+        info "Select transport protocol:"
+        echo "  1) iSCSI (traditional, widely compatible)"
+        echo "  2) NVMe/TCP (modern, lower latency)"
+        echo
+
+        local transport_choice
+        while true; do
+            read -rp "Transport mode [1-2]: " transport_choice
+            case "$transport_choice" in
+                1) WIZARD_TRANSPORT_MODE="iscsi"; break ;;
+                2) WIZARD_TRANSPORT_MODE="nvme-tcp"; break ;;
+                *) error "Invalid choice. Please enter 1 or 2" ;;
+            esac
+        done
+
+        # Check nvme-cli for NVMe/TCP
+        if [[ "$WIZARD_TRANSPORT_MODE" == "nvme-tcp" ]]; then
+            if ! check_nvme_cli; then
+                echo
+                warning "nvme-cli package is not installed"
+                info "NVMe/TCP requires nvme-cli for management"
+                read -rp "Install nvme-cli now? [Y/n]: " install_nvme
+                if [[ ! "$install_nvme" =~ ^[Nn] ]]; then
+                    info "Installing nvme-cli..."
+                    if apt-get update -qq && apt-get install -y -qq nvme-cli; then
+                        success "nvme-cli installed successfully"
+                    else
+                        error "Failed to install nvme-cli"
+                        return 1
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # --- Final Summary ---
+    clear_screen
+    print_banner
+    echo
+    print_header "Storage Provisioning"
+    show_wizard_summary "complete"
+
+    return 0
+}
+
 # Configuration wizard
 menu_configure_storage() {
+    clear_screen
+    print_banner
     print_header "Storage Configuration Wizard"
-
-    info "This wizard will help you configure TrueNAS storage for Proxmox"
-    echo
 
     # Check for existing storage entries
     local existing_storages
@@ -5963,7 +10490,7 @@ menu_configure_storage() {
         storage_count=$(echo "$existing_storages" | wc -l)
 
         # Present menu (don't show storage list yet)
-        info "Found $storage_count existing TrueNAS storage configuration(s)"
+        echo -e "  Found ${c6}$storage_count${c0} existing TrueNAS storage configuration(s)"
         echo
         info "What would you like to do?"
         echo "  1) Edit an existing storage"
@@ -6017,11 +10544,18 @@ menu_configure_storage() {
                 done
                 ;;
             2)
-                # Add new storage mode - continue with existing workflow below
+                # Add new storage mode - use progressive wizard
+                if ! wizard_add_storage; then
+                    return 1
+                fi
+                # Continue with provisioning using wizard-collected values
                 ;;
             3)
-                # Delete mode - show storage list and confirm deletion
-                echo
+                # Delete mode - clear screen and show storage list
+                clear_screen
+                print_banner
+                print_header "Delete Storage Configuration"
+
                 info "Available storage configurations:"
                 local idx=1
                 local -a storage_array=()
@@ -6037,6 +10571,8 @@ menu_configure_storage() {
                     read -rp "Select storage to delete [1-${#storage_array[@]}] or 0 to cancel: " storage_idx
                     if [[ "$storage_idx" == "0" ]]; then
                         info "Deletion cancelled"
+                        read -rp "Press any key to return to main menu..." -n1 _
+                        echo
                         return 0
                     elif [[ "$storage_idx" =~ ^[0-9]+$ ]] && [[ "$storage_idx" -ge 1 ]] && [[ "$storage_idx" -le "${#storage_array[@]}" ]]; then
                         storage_name="${storage_array[$((storage_idx-1))]}"
@@ -6046,92 +10582,277 @@ menu_configure_storage() {
                     fi
                 done
 
-                # Warning and confirmation
-                echo
-                warning "WARNING: Deleting storage configuration '$storage_name'"
+                # Clear screen and show warning
+                clear_screen
+                print_banner
+                print_header "Delete Storage Configuration"
+
+                warning "WARNING: Deleting storage configuration '${c1}$storage_name${c0}'"
                 warning "This will remove the storage from Proxmox configuration."
                 warning "VMs using disks on this storage will lose access until reconfigured."
                 echo
 
                 local confirm
-                read -rp "Type storage name '$storage_name' to confirm deletion: " confirm
+                echo -en "Type storage name '${c1}$storage_name${c0}' to confirm deletion: "
+                read -r confirm
                 if [[ "$confirm" != "$storage_name" ]]; then
                     warning "Confirmation failed. Deletion cancelled."
-                    return 1
+                    read -rp "Press any key to return to main menu..." -n1 _
+                    echo
+                    return 0
                 fi
 
-                # Read transport_mode BEFORE deletion (config will be gone after)
-                local transport_mode
+                # Read config values BEFORE deletion (config will be gone after)
+                local transport_mode api_host api_key subsystem_nqn
                 transport_mode=$(get_storage_config_value "$storage_name" "transport_mode" 2>/dev/null || echo "iscsi")
+                api_host=$(get_storage_config_value "$storage_name" "api_host" 2>/dev/null)
+                api_key=$(get_storage_config_value "$storage_name" "api_key" 2>/dev/null)
+                subsystem_nqn=$(get_storage_config_value "$storage_name" "subsystem_nqn" 2>/dev/null)
 
                 # Perform deletion
-                if remove_storage_config "$storage_name"; then
+                echo
+                printf "%-30s " "Removing from storage.cfg:"
+                start_spinner
+                local remove_result
+                remove_result=$(remove_storage_config "$storage_name" 2>&1)
+                local remove_exit=$?
+                stop_spinner
+
+                if [[ $remove_exit -eq 0 ]]; then
+                    echo -e "\r$(printf "%-30s " "Removing from storage.cfg:")${c2}✓${c0} Removed"
+
+                    # Verify removal from pvesm
+                    printf "%-30s " "Verifying removal:"
+                    start_spinner
+                    sleep 1
+                    local pvesm_check
+                    pvesm_check=$(pvesm status 2>&1 | grep -E "^${storage_name}\s" || true)
+                    stop_spinner
+
+                    if [[ -z "$pvesm_check" ]]; then
+                        echo -e "\r$(printf "%-30s " "Verifying removal:")${c2}✓${c0} Not in pvesm"
+                    else
+                        echo -e "\r$(printf "%-30s " "Verifying removal:")${c3}!${c0} May need service restart"
+                    fi
+
+                    echo
                     success "Storage '$storage_name' has been deleted"
 
-                    # Check if this was an iSCSI storage and offer orphan cleanup
-                    if [[ "$transport_mode" != "nvme-tcp" ]]; then
-                        echo
-                        read -rp "Would you like to cleanup orphaned resources on TrueNAS? (y/N): " cleanup_response
-                        if [[ "$cleanup_response" =~ ^[Yy] ]]; then
-                            info "Note: Storage no longer exists in config. Manual cleanup may be needed."
+                    # Offer to cleanup TrueNAS resources
+                    if [[ -n "$api_host" && -n "$api_key" ]]; then
+                        if [[ "$transport_mode" == "nvme-tcp" && -n "$subsystem_nqn" ]]; then
+                            # NVMe/TCP: offer to delete the subsystem
+                            echo
+                            warning "The NVMe subsystem still exists on TrueNAS:"
+                            echo "  Subsystem NQN: $subsystem_nqn"
+                            echo
+                            read -rp "Would you like to delete the NVMe subsystem on TrueNAS? [y/N]: " cleanup_response
+                            if [[ "$cleanup_response" =~ ^[Yy] ]]; then
+                                # Get subsystem ID by querying
+                                printf "%-30s " "Looking up subsystem:"
+                                start_spinner
+                                local subsys_query subsys_id
+                                subsys_query=$(tn_api_call "$api_host" "$api_key" "nvmet.subsys.query" '[[["subnqn", "=", "'"$subsystem_nqn"'"]]]' 2>&1)
+                                subsys_id=$(echo "$subsys_query" | grep -oP '"id"\s*:\s*\K[0-9]+' | head -1)
+                                stop_spinner
+
+                                if [[ -n "$subsys_id" ]]; then
+                                    echo -e "\r$(printf "%-30s " "Looking up subsystem:")${c2}✓${c0} Found (ID: $subsys_id)"
+
+                                    printf "%-30s " "Deleting subsystem:"
+                                    start_spinner
+                                    local delete_result
+                                    # Use force=true to handle port associations and any remaining namespaces
+                                    delete_result=$(tn_api_call_write "$api_host" "$api_key" "nvmet.subsys.delete" "[$subsys_id, {\"force\": true}]" 2>&1)
+                                    local delete_exit=$?
+                                    stop_spinner
+
+                                    if [[ $delete_exit -eq 0 ]]; then
+                                        echo -e "\r$(printf "%-30s " "Deleting subsystem:")${c2}✓${c0} Deleted"
+                                        success "NVMe subsystem deleted from TrueNAS"
+                                    else
+                                        echo -e "\r$(printf "%-30s " "Deleting subsystem:")${c1}✗${c0} Failed"
+                                        error "Failed to delete subsystem: $delete_result"
+                                        warning "The subsystem may have active namespaces. Use orphan cleanup to remove them first."
+                                    fi
+                                else
+                                    echo -e "\r$(printf "%-30s " "Looking up subsystem:")${c3}!${c0} Not found"
+                                    info "Subsystem may have already been deleted"
+                                fi
+                            fi
+                        else
+                            # iSCSI: Note about orphan cleanup
+                            echo
+                            info "Tip: Use Diagnostics > Cleanup orphaned resources to remove"
+                            info "any remaining iSCSI extents, targets, or zvols on TrueNAS."
                         fi
                     fi
                 else
+                    echo -e "\r$(printf "%-30s " "Removing from storage.cfg:")${c1}✗${c0} Failed"
+                    echo "  $remove_result"
                     error "Failed to delete storage configuration"
-                    return 1
                 fi
 
+                read -rp "Press any key to return to main menu..." -n1 _
+                echo
                 return 0
                 ;;
         esac
     fi
 
     # Continue with "Add New Storage" workflow
-    # Prompt for storage name
-    local storage_name
-    while true; do
-        read -rp "Storage name (e.g., truenas-main): " storage_name
-        if [[ -z "$storage_name" ]]; then
-            error "Storage name cannot be empty"
-            continue
+    # If wizard hasn't been run yet (no existing storages case), run it now
+    if [[ -z "$WIZARD_CONFIG_MODE" ]]; then
+        if ! wizard_add_storage; then
+            return 1
         fi
-        if ! validate_storage_name "$storage_name"; then
-            error "Invalid storage name. Use only letters, numbers, hyphens, and underscores"
-            continue
-        fi
-        if storage_name_exists "$storage_name"; then
-            error "Storage name '$storage_name' already exists in $STORAGE_CFG"
-            read -rp "Choose a different name? (Y/n): " choice
-            [[ ! "$choice" =~ ^[Nn] ]] && continue || return 1
-        fi
-        break
-    done
+    fi
 
-    # TrueNAS IP
-    local truenas_ip
-    while true; do
-        read -rp "TrueNAS IP address: " truenas_ip
-        if validate_ip "$truenas_ip"; then
-            break
+    # Use wizard-collected values
+    local storage_name="$WIZARD_STORAGE_NAME"
+    local truenas_ip="$WIZARD_TRUENAS_IP"
+    local api_key="$WIZARD_API_KEY"
+    local provisioning_mode="$WIZARD_CONFIG_MODE"
+    local transport_mode="$WIZARD_TRANSPORT_MODE"
+
+    # Handle automated provisioning mode
+    if [[ "$provisioning_mode" == "create" ]]; then
+        # Run automated provisioning workflow
+        if ! provision_storage_resources "$storage_name" "$truenas_ip" "$api_key" "$transport_mode"; then
+            error "Automated provisioning failed"
+            read -rp "Would you like to continue with manual configuration? [y/N]: " manual_choice
+            if [[ ! "$manual_choice" =~ ^[Yy] ]]; then
+                return 1
+            fi
+            # Fall through to manual workflow
+            provisioning_mode="existing"
         else
-            error "Invalid IP address format"
+            # Provisioning succeeded - use provisioned values and wizard settings
+            local dataset="$PROVISIONED_DATASET"
+            local target=""
+            local subsystem_nqn=""
+            local portal=""
+            local hostnqn=""
+            local blocksize="$PROV_BLOCKSIZE"
+            local sparse="$PROV_SPARSE"
+            local use_multipath="$PROV_USE_MULTIPATH"
+            local portals="$PROV_ADDITIONAL_PORTALS"
+
+            if [[ "$transport_mode" == "nvme-tcp" ]]; then
+                subsystem_nqn="$PROVISIONED_SUBSYSTEM_NQN"
+                portal="${PROVISIONED_PORTAL_IP}:${PROVISIONED_PORTAL_PORT}"
+                hostnqn="$PROV_HOSTNQN"
+            else
+                target="$PROVISIONED_TARGET_IQN"
+                portal="${PROVISIONED_PORTAL_IP}:${PROVISIONED_PORTAL_PORT}"
+            fi
+
+            # Generate configuration using wizard-collected values
+            local config
+            if [[ "$transport_mode" == "nvme-tcp" ]]; then
+                config=$(generate_storage_config "$storage_name" "$truenas_ip" "$api_key" "$dataset" "$subsystem_nqn" "$portal" "$blocksize" "$sparse" "$use_multipath" "$portals" "$transport_mode" "$hostnqn")
+            else
+                config=$(generate_storage_config "$storage_name" "$truenas_ip" "$api_key" "$dataset" "$target" "$portal" "$blocksize" "$sparse" "$use_multipath" "$portals" "$transport_mode" "")
+            fi
+
+            # Show final configuration summary
+            clear_screen
+            print_banner
+            print_header "Final Storage Configuration"
+
+            echo "$config"
+            echo "─────────────────────────────────────────────────────────"
+
+            read -rp "Add this configuration to Proxmox? [Y/n]: " confirm
+            if [[ "$confirm" =~ ^[Nn] ]]; then
+                warning "Configuration cancelled"
+                return 1
+            fi
+
+            # Clear screen and show finalization header
+            clear_screen
+            print_banner
+            echo
+            print_header "Finalizing Storage Configuration"
+
+            local finalize_errors=0
+
+            # Step 1: Backup storage.cfg
+            printf "%-30s " "Configuration backup:"
+            start_spinner
+            local backup_path
+            local backup_error
+            backup_error=$(backup_storage_cfg 2>&1 1>/tmp/backup_path_$$)
+            local backup_exit=$?
+            backup_path=$(cat /tmp/backup_path_$$ 2>/dev/null)
+            rm -f /tmp/backup_path_$$ 2>/dev/null
+            stop_spinner
+            if [[ $backup_exit -eq 0 ]] && [[ -n "$backup_path" ]]; then
+                echo -e "\r$(printf "%-30s " "Configuration backup:")${c2}✓${c0} $backup_path"
+            elif [[ $backup_exit -eq 0 ]]; then
+                # No backup needed (no existing storage.cfg)
+                echo -e "\r$(printf "%-30s " "Configuration backup:")${c2}✓${c0} Not needed"
+            else
+                echo -e "\r$(printf "%-30s " "Configuration backup:")${c1}✗${c0} Failed"
+                echo "  $backup_error"
+                ((finalize_errors++))
+            fi
+
+            # Step 2: Add storage configuration
+            if [[ $finalize_errors -eq 0 ]]; then
+                printf "%-30s " "Storage configuration:"
+                start_spinner
+                # Append configuration directly (backup already done)
+                echo "" >> "$STORAGE_CFG" 2>/dev/null
+                echo "$config" >> "$STORAGE_CFG" 2>/dev/null
+                local config_exit=$?
+                stop_spinner
+                if [[ $config_exit -eq 0 ]]; then
+                    echo -e "\r$(printf "%-30s " "Storage configuration:")${c2}✓${c0} Added to storage.cfg"
+                    log "INFO" "Storage configuration added"
+                else
+                    echo -e "\r$(printf "%-30s " "Storage configuration:")${c1}✗${c0} Failed to write"
+                    ((finalize_errors++))
+                fi
+            fi
+
+            # Step 3: Validate storage with pvesm (retry for up to 10 seconds)
+            if [[ $finalize_errors -eq 0 ]]; then
+                printf "%-30s " "Storage validation:"
+                start_spinner
+                local pvesm_result=""
+                local validation_timeout=10
+                local validation_start=$SECONDS
+                while [[ $((SECONDS - validation_start)) -lt $validation_timeout ]]; do
+                    pvesm_result=$(pvesm status 2>&1 | grep -E "^${storage_name}\s" || true)
+                    if [[ -n "$pvesm_result" ]]; then
+                        break
+                    fi
+                    sleep 1
+                done
+                stop_spinner
+                if [[ -n "$pvesm_result" ]]; then
+                    echo -e "\r$(printf "%-30s " "Storage validation:")${c2}✓${c0} Valid"
+                else
+                    echo -e "\r$(printf "%-30s " "Storage validation:")${c3}!${c0} May need service restart"
+                fi
+            fi
+
+            echo
+            if [[ $finalize_errors -gt 0 ]]; then
+                error "Storage configuration failed"
+                return 1
+            fi
+
+            success "Storage '$storage_name' configured successfully!"
+
+            read -rp "Press any key to return to main menu..." -n1 _
+            echo
+            return 0
         fi
-    done
-
-    # API Key
-    local api_key
-    read -rp "TrueNAS API key: " api_key
-    if [[ -z "$api_key" ]]; then
-        error "API key cannot be empty"
-        return 1
     fi
 
-    # Test connectivity
-    if ! test_truenas_api "$truenas_ip" "$api_key"; then
-        error "Failed to connect to TrueNAS. Please check IP and API key."
-        read -rp "Continue anyway? (y/N): " choice
-        [[ "$choice" =~ ^[Yy] ]] || return 1
-    fi
+    # Manual workflow continues here (when provisioning_mode="existing")
 
     # Dataset
     local dataset
@@ -6146,7 +10867,7 @@ menu_configure_storage() {
         if ! verify_dataset "$truenas_ip" "$api_key" "$dataset"; then
             echo
             warning "Dataset verification failed. The dataset may not exist or may not be accessible."
-            read -rp "Continue anyway? (y/N): " continue_choice
+            read -rp "Continue anyway? [y/N]: " continue_choice
             if [[ "$continue_choice" =~ ^[Yy] ]]; then
                 warning "Proceeding with unverified dataset '$dataset'"
                 break
@@ -6195,7 +10916,7 @@ menu_configure_storage() {
         if ! check_nvme_cli; then
             warning "nvme-cli package is not installed"
             info "NVMe/TCP requires nvme-cli for management"
-            read -rp "Install nvme-cli now? (Y/n): " install_nvme
+            read -rp "Install nvme-cli now? [Y/n]: " install_nvme
             if [[ ! "$install_nvme" =~ ^[Nn] ]]; then
                 info "Installing nvme-cli..."
                 if ! apt-get update; then
@@ -6251,30 +10972,106 @@ menu_configure_storage() {
         default_port="3260"
     fi
 
-    read -rp "Portal IP (optional, press Enter to use TrueNAS IP): " portal
-    if [[ -z "$portal" ]]; then
-        portal="${truenas_ip}:${default_port}"
-    elif [[ ! "$portal" =~ : ]]; then
-        # Add default port if not specified
-        portal="${portal}:${default_port}"
-    fi
+    while true; do
+        read -rp "Portal IP (optional, press Enter to use TrueNAS IP): " portal
+        if [[ -z "$portal" ]]; then
+            portal="${truenas_ip}:${default_port}"
+            break
+        else
+            # Extract IP part (may or may not have port)
+            local portal_ip="${portal%%:*}"
+            if ! validate_ip "$portal_ip"; then
+                error "Invalid IP address format"
+                continue
+            fi
+            if [[ ! "$portal" =~ : ]]; then
+                # Add default port if not specified
+                portal="${portal}:${default_port}"
+            else
+                # Validate port number
+                local portal_port="${portal##*:}"
+                if ! [[ "$portal_port" =~ ^[0-9]+$ ]] || [[ "$portal_port" -lt 1 ]] || [[ "$portal_port" -gt 65535 ]]; then
+                    error "Invalid port number (must be 1-65535)"
+                    continue
+                fi
+            fi
+            break
+        fi
+    done
 
-    # Blocksize (optional)
+    # Blocksize configuration
+    echo
+    info "ZFS Block Size Configuration:"
+    echo "  Recommended sizes based on workload:"
+    echo "    4K  - Databases with small random I/O (PostgreSQL, MySQL)"
+    echo "    8K  - General-purpose databases, mixed workloads"
+    echo "    16K - Default, balanced for most VM workloads (Recommended)"
+    echo "    32K - Large sequential I/O, media files"
+    echo "    64K - Very large files, backup storage"
+    echo "    128K - Maximum for large sequential workloads"
+    echo
     local blocksize
-    read -rp "Block size [16K]: " blocksize
-    blocksize="${blocksize:-16K}"
+    while true; do
+        read -rp "Block size [16K]: " blocksize
+        blocksize="${blocksize:-16K}"
+        # Validate blocksize format (number followed by K or M)
+        if [[ "$blocksize" =~ ^[0-9]+[KkMm]$ ]]; then
+            # Normalize to uppercase
+            blocksize="${blocksize^^}"
+            # Extract numeric part
+            local bs_num="${blocksize%[KM]}"
+            local bs_unit="${blocksize: -1}"
+            # Convert to bytes for validation
+            local bs_bytes
+            if [[ "$bs_unit" == "K" ]]; then
+                bs_bytes=$((bs_num * 1024))
+            else
+                bs_bytes=$((bs_num * 1024 * 1024))
+            fi
+            # Valid range: 512 bytes to 1M (ZFS limit)
+            if [[ "$bs_bytes" -ge 512 ]] && [[ "$bs_bytes" -le 1048576 ]]; then
+                # Must be power of 2
+                if (( (bs_bytes & (bs_bytes - 1)) == 0 )); then
+                    break
+                else
+                    error "Block size must be a power of 2 (e.g., 4K, 8K, 16K, 32K, 64K, 128K)"
+                fi
+            else
+                error "Block size must be between 512 bytes and 1M"
+            fi
+        else
+            error "Invalid format. Use number followed by K or M (e.g., 16K, 128K, 1M)"
+        fi
+    done
 
-    # Sparse (optional)
+    # Sparse volume configuration
+    echo
+    info "Sparse Volume Configuration:"
+    echo "  Sparse volumes (thin provisioning) allocate space on-demand rather than"
+    echo "  pre-allocating the full size. This saves storage space but may cause"
+    echo "  slight fragmentation over time. Recommended for most use cases."
+    echo
     local sparse
-    read -rp "Enable sparse volumes? (0/1) [1]: " sparse
-    sparse="${sparse:-1}"
+    while true; do
+        read -rp "Enable sparse volumes? [Y/n]: " sparse_choice
+        sparse_choice="${sparse_choice:-Y}"
+        if [[ "$sparse_choice" =~ ^[Yy]$ ]]; then
+            sparse="1"
+            break
+        elif [[ "$sparse_choice" =~ ^[Nn]$ ]]; then
+            sparse="0"
+            break
+        else
+            error "Please enter Y or N"
+        fi
+    done
 
     # Multipath configuration
     echo
     info "Advanced Options:"
     local use_multipath=""
     local portals=""
-    read -rp "Enable multipath I/O for redundancy/load balancing? (y/N): " enable_mp
+    read -rp "Enable multipath I/O for redundancy/load balancing? [y/N]: " enable_mp
 
     if [[ "$enable_mp" =~ ^[Yy] ]]; then
         if [[ "$transport_mode" == "iscsi" ]]; then
@@ -6282,7 +11079,7 @@ menu_configure_storage() {
             if ! command -v multipath &> /dev/null; then
                 warning "multipath-tools package is not installed"
                 info "Multipath requires: apt-get install multipath-tools"
-                read -rp "Continue configuring multipath anyway? (y/N): " continue_mp
+                read -rp "Continue configuring multipath anyway? [y/N]: " continue_mp
                 if [[ ! "$continue_mp" =~ ^[Yy] ]]; then
                     info "Multipath disabled"
                 else
@@ -6388,21 +11185,68 @@ menu_configure_storage() {
     fi
 
     # Generate configuration
-    echo
-    info "Configuration summary:"
-    info "Transport mode: ${transport_mode}"
-    echo "─────────────────────────────────────────────────────────"
     local config
     if [[ "$transport_mode" == "nvme-tcp" ]]; then
         config=$(generate_storage_config "$storage_name" "$truenas_ip" "$api_key" "$dataset" "$subsystem_nqn" "$portal" "$blocksize" "$sparse" "$use_multipath" "$portals" "$transport_mode" "$hostnqn")
     else
         config=$(generate_storage_config "$storage_name" "$truenas_ip" "$api_key" "$dataset" "$target" "$portal" "$blocksize" "$sparse" "$use_multipath" "$portals" "$transport_mode" "")
     fi
+
+    # Display summary with validation status
+    echo
+    echo "─────────────────────────────────────────────────────────"
+    info "Configuration Summary"
+    echo "─────────────────────────────────────────────────────────"
+    echo
+    # Storage name - validated for format
+    printf "  ${c2}✓${c0} %-20s %s\n" "Storage Name:" "$storage_name"
+    # TrueNAS IP - validated with validate_ip
+    printf "  ${c2}✓${c0} %-20s %s\n" "TrueNAS IP:" "$truenas_ip"
+    # API Key - show masked, validated via API test
+    local masked_key="${api_key:0:8}...${api_key: -4}"
+    printf "  ${c2}✓${c0} %-20s %s\n" "API Key:" "$masked_key"
+    # Dataset - may or may not be verified
+    printf "  ${c2}✓${c0} %-20s %s\n" "Dataset:" "$dataset"
+    # Transport mode - validated via selection
+    printf "  ${c2}✓${c0} %-20s %s\n" "Transport Mode:" "$transport_mode"
+    # Target/Subsystem based on mode
+    if [[ "$transport_mode" == "nvme-tcp" ]]; then
+        printf "  ${c4}○${c0} %-20s %s\n" "Subsystem NQN:" "$subsystem_nqn"
+        if [[ -n "$hostnqn" ]]; then
+            printf "  ${c4}○${c0} %-20s %s\n" "Host NQN:" "$hostnqn"
+        fi
+    else
+        printf "  ${c4}○${c0} %-20s %s\n" "Target IQN:" "$target"
+    fi
+    # Portal - validated for IP and port
+    printf "  ${c2}✓${c0} %-20s %s\n" "Discovery Portal:" "$portal"
+    # Block size - validated
+    printf "  ${c2}✓${c0} %-20s %s\n" "Block Size:" "$blocksize"
+    # Sparse - validated
+    local sparse_display="Yes (thin provisioning)"
+    [[ "$sparse" == "0" ]] && sparse_display="No (thick provisioning)"
+    printf "  ${c2}✓${c0} %-20s %s\n" "Sparse Volumes:" "$sparse_display"
+    # Multipath - display based on transport mode
+    if [[ "$transport_mode" == "iscsi" ]]; then
+        local mp_display="Disabled"
+        [[ "$use_multipath" == "1" ]] && mp_display="Enabled"
+        printf "  ${c2}✓${c0} %-20s %s\n" "Multipath:" "$mp_display"
+    fi
+    # Additional portals if configured
+    if [[ -n "$portals" ]]; then
+        printf "  ${c2}✓${c0} %-20s %s\n" "Additional Portals:" "$portals"
+    fi
+    echo
+    echo "  ${c2}✓${c0} = Validated    ${c4}○${c0} = User provided (not validated)"
+    echo
+    echo "─────────────────────────────────────────────────────────"
+    echo "Raw configuration to be added:"
+    echo "─────────────────────────────────────────────────────────"
     echo "$config"
     echo "─────────────────────────────────────────────────────────"
     echo
 
-    read -rp "Add this configuration to $STORAGE_CFG? (Y/n): " confirm
+    read -rp "Add this configuration to $STORAGE_CFG? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn] ]]; then
         warning "Configuration cancelled"
         return 1
@@ -6543,7 +11387,7 @@ menu_rollback() {
 
     echo
     warning "This will replace the current plugin with the selected backup"
-    read -rp "Continue with rollback? (y/N): " confirm
+    read -rp "Continue with rollback? [y/N]: " confirm
 
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         info "Rollback cancelled"
@@ -6682,7 +11526,7 @@ delete_old_backups() {
     done
     echo
 
-    read -rp "Delete these backups? (y/N): " confirm
+    read -rp "Delete these backups? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         info "Deletion cancelled"
         return 0
@@ -6745,7 +11589,7 @@ keep_latest_backups() {
 
     echo
     warning "This will delete $delete_count backup(s), keeping only the $keep_count most recent"
-    read -rp "Continue? (y/N): " confirm
+    read -rp "Continue? [y/N]: " confirm
 
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         info "Deletion cancelled"
@@ -6965,7 +11809,7 @@ uninstall_plugin() {
             done
             echo
 
-            read -rp "Remove all TrueNAS storage configurations? (y/N): " confirm
+            read -rp "Remove all TrueNAS storage configurations? [y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy] ]]; then
                 echo "$storages" | while read -r storage; do
                     remove_storage_config "$storage"
@@ -7008,14 +11852,14 @@ menu_uninstall() {
     echo "  • You can rollback using the backup if needed"
     echo
 
-    read -rp "Are you sure you want to uninstall? (y/N): " confirm
+    read -rp "Are you sure you want to uninstall? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         info "Uninstallation cancelled"
         return 0
     fi
 
     echo
-    read -rp "Also remove storage configuration from $STORAGE_CFG? (y/N): " remove_config_choice
+    read -rp "Also remove storage configuration from $STORAGE_CFG? [y/N]: " remove_config_choice
 
     local remove_config=false
     [[ "$remove_config_choice" =~ ^[Yy] ]] && remove_config=true

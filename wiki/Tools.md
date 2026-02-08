@@ -8,6 +8,7 @@ The plugin includes several tools to simplify installation, testing, cluster man
 
 **Integrated Features** (via `install.sh` Diagnostics Menu):
 - **[Integrated Plugin Test](#integrated-plugin-test)** - Quick function validation via installer
+- **[Diagnostics Bundle](#diagnostics-bundle)** - 10-minute strace capture with system diagnostics for troubleshooting
 - **[FIO Storage Benchmark](#fio-storage-benchmark)** - Comprehensive I/O performance testing (30 tests)
 - **[Health Check Tool](#health-check-tool)** - Quick health validation for monitoring
 - **[Orphan Cleanup](#orphan-cleanup)** - Find and remove orphaned iSCSI resources
@@ -358,26 +359,27 @@ truenasplugin: tnscale
 
 ### Viewing Debug Logs
 
-All debug output goes to syslog:
+All debug output goes to syslog with the `[TrueNAS]` prefix for easy filtering:
 
 ```bash
-# View all plugin logs in real-time
-journalctl -t truenasplugin -f
+# Best method: Search for [TrueNAS] prefix (works regardless of calling process)
+journalctl --since '10 minutes ago' | grep '\[TrueNAS\]'
 
-# View recent logs
-journalctl -t truenasplugin --since "5 minutes ago"
+# Real-time monitoring
+journalctl -f | grep '\[TrueNAS\]'
 
-# Filter by priority
-journalctl -t truenasplugin -p info
-journalctl -t truenasplugin -p debug
+# Count log messages (useful for verifying debug level)
+journalctl --since '5 minutes ago' | grep -c '\[TrueNAS\]'
 ```
+
+**Note**: The syslog identifier varies based on the calling process (`pvesm`, `pvedaemon`, `pvestatd`, etc.), so filtering by the `[TrueNAS]` prefix is more reliable than filtering by syslog tag.
 
 ### Debug Level Examples
 
 #### Level 0 (Errors Only - Default)
 
 ```
-Oct 08 07:15:23 pve-node truenasplugin[12345]: alloc_image pre-flight check failed for VM 100: API unreachable
+Nov 22 17:01:07 pve-node pvesm[12345]: [TrueNAS] alloc_image pre-flight check failed for VM 100: API unreachable
 ```
 
 Minimal logging - only critical errors. **Recommended for production.**
@@ -385,10 +387,10 @@ Minimal logging - only critical errors. **Recommended for production.**
 #### Level 1 (Light Diagnostic)
 
 ```
-Oct 08 07:15:23 pve-node truenasplugin[12345]: alloc_image: vmid=100, name=undef, size=33554432 KiB
-Oct 08 07:15:23 pve-node truenasplugin[12345]: alloc_image: running pre-flight checks for 34359738368 bytes
-Oct 08 07:15:24 pve-node truenasplugin[12345]: alloc_image: pre-flight checks passed for 32.00 GB volume
-Oct 08 07:15:25 pve-node truenasplugin[12345]: free_image: volname=vol-vm-100-disk-0-lun5
+Nov 22 17:01:07 pve-node pvesm[12345]: [TrueNAS] alloc_image: vmid=100, name=vm-100-disk-0, size=10485760 KiB
+Nov 22 17:01:08 pve-node pvesm[12345]: [TrueNAS] Pre-flight: checking target visibility for iqn.2005-10.org.freenas.ctl:proxmox
+Nov 22 17:01:09 pve-node pvesm[12345]: [TrueNAS] alloc_image: pre-flight checks passed for 10.00 GB volume
+Nov 22 17:01:10 pve-node pvesm[12345]: [TrueNAS] free_image: volname=vm-100-disk-0-lun5
 ```
 
 Shows function entry/exit and key operations. **Recommended for troubleshooting.**
@@ -396,11 +398,11 @@ Shows function entry/exit and key operations. **Recommended for troubleshooting.
 #### Level 2 (Verbose)
 
 ```
-Oct 08 07:15:23 pve-node truenasplugin[12345]: alloc_image: vmid=100, size=33554432 KiB
-Oct 08 07:15:23 pve-node truenasplugin[12345]: alloc_image: converting 33554432 KiB → 34359738368 bytes
-Oct 08 07:15:23 pve-node truenasplugin[12345]: _api_call: method=pool.dataset.create, transport=ws, params=[{"name":"pve_test/pve-storage/vm-100-disk-0","type":"VOLUME","volsize":34359738368}]
-Oct 08 07:15:24 pve-node truenasplugin[12345]: _api_call: response from pool.dataset.create: {"id":"pve_test/pve-storage/vm-100-disk-0"}
-Oct 08 07:15:24 pve-node truenasplugin[12345]: _api_call: method=iscsi.extent.create, params=[{"name":"vm-100-disk-0","disk":"zvol/pve_test/vm-100-disk-0"}]
+Nov 22 17:01:07 pve-node pvesm[12345]: [TrueNAS] alloc_image: vmid=100, size=10485760 KiB
+Nov 22 17:01:08 pve-node pvesm[12345]: [TrueNAS] _api_call: method=pool.dataset.create, transport=ws
+Nov 22 17:01:08 pve-node pvesm[12345]: [TrueNAS] _api_call: params=[{"name":"tank/proxmox/vm-100-disk-0","type":"VOLUME","volsize":10737418240}]
+Nov 22 17:01:09 pve-node pvesm[12345]: [TrueNAS] _api_call: response={"id":"tank/proxmox/vm-100-disk-0"}
+Nov 22 17:01:09 pve-node pvesm[12345]: [TrueNAS] _api_call: method=iscsi.extent.create, transport=ws
 ```
 
 Full API payloads and detailed traces. **Use for deep debugging only** (generates significant log volume).
@@ -433,11 +435,11 @@ sed -i '/truenasplugin: tnscale/a\        debug 1' /etc/pve/storage.cfg
 echo "        debug 1" >> /etc/pve/storage.cfg  # (add after storage entry)
 
 # Attempt operation and capture logs
-journalctl -t truenasplugin -f > debug.log &
+journalctl -f | grep '\[TrueNAS\]' > debug.log &
 pvesh create /nodes/$(hostname)/storage/tnscale/content --vmid 100 --filename vm-100-disk-0 --size 10G
 
 # Review logs
-grep -A 5 "alloc_image" debug.log
+grep "alloc_image" debug.log
 ```
 
 **Problem**: Size mismatch
@@ -445,9 +447,9 @@ grep -A 5 "alloc_image" debug.log
 # Enable verbose logging
 sed -i '/truenasplugin: tnscale/a\        debug 2' /etc/pve/storage.cfg
 
-# Check unit conversion in logs
-journalctl -t truenasplugin | grep "converting"
-# Should show: "converting X KiB → Y bytes"
+# Check API call parameters in logs
+journalctl --since '5 minutes ago' | grep '\[TrueNAS\].*_api_call'
+# Should show: [TrueNAS] _api_call: method=pool.dataset.create with volsize parameter
 ```
 
 ### Log Rotation
@@ -739,6 +741,142 @@ Cluster detected - additional tests available:
 
 ---
 
+## Diagnostics Bundle
+
+### Overview
+
+The Diagnostics Bundle feature is built into the interactive installer (`install.sh`) and captures a comprehensive snapshot of your Proxmox node for troubleshooting WebSocket connection issues, fork-related crashes, and pvestatd problems. It combines a 10-minute strace capture of pvestatd with 13 sections of system and plugin diagnostics.
+
+**Access Method**: Run `bash install.sh`, select "Diagnostics" from the main menu, then choose "Create diagnostics bundle"
+
+**Output**: Single compressed tarball (`truenas-diag-TIMESTAMP.tar.gz`) containing:
+- `truenas-diag-TIMESTAMP.log` - Main diagnostic log with 13 sections
+- `truenas-strace-TIMESTAMP.log` - 10-minute strace capture of pvestatd
+
+### Bundle Contents
+
+**Diagnostic Log Sections**:
+1. Plugin version and MD5 checksum
+2. Environment info (Perl version, IO::Socket::SSL, OpenSSL, Proxmox versions)
+3. Storage configuration (all TrueNAS storages, API keys redacted)
+4. pvestatd status at capture start
+5. Open file descriptors and socket connections
+6. Process tree snapshot
+7. Existing coredumps (if any)
+8. Kernel crash logs (last 7 days)
+9. pvestatd error logs (last 7 days)
+10. System info (uptime, memory, kernel, CPU)
+11. Post-capture pvestatd status
+12. New crash logs (if crash occurred during capture)
+13. Recent pvestatd journal logs
+
+**Strace Capture**: Monitors the following syscalls over 10 minutes:
+- `clone`, `fork`, `vfork` - Process creation (fork-related issues)
+- `socket`, `close`, `connect` - Connection management
+- `read`, `write` - Data transfer
+- `exit_group` - Process termination
+
+### Use Cases
+
+**When to Use**:
+- Diagnosing WebSocket fork-related crashes or segfaults
+- Investigating pvestatd hangs or crashes
+- Capturing connection management patterns during failure
+- Collecting data for plugin maintainers to debug issues
+- Validating proper connection cleanup during fork events
+
+**When Not to Use**:
+- For simple configuration validation (use Health Check Tool instead)
+- For performance testing (use FIO Storage Benchmark instead)
+- When pvestatd is not running
+
+### Running the Bundle Capture
+
+**Prerequisites**:
+- Root access on Proxmox node
+- pvestatd service running (`systemctl status pvestatd`)
+- 10 minutes available (capture duration is fixed)
+
+**Steps**:
+1. Run `bash install.sh` on the Proxmox node
+2. Select "Diagnostics" from the main menu
+3. Select "Create diagnostics bundle"
+4. Review the warnings about what will be captured
+5. Type `CAPTURE` at the confirmation prompt (case-sensitive, prevents accidental 10-minute waits)
+6. Wait while the bundle captures data
+   - The progress display shows elapsed time and pvestatd status
+   - If pvestatd crashes during capture, it's detected and noted
+7. Bundle is automatically compressed and saved to `/tmp/`
+
+**Example Output**:
+```
+Diagnostics Bundle
+
+  This will capture the following for 10 minutes:
+    - System and plugin information
+    - All TrueNAS storage configurations (API keys redacted)
+    - strace of pvestatd (captures fork/socket activity)
+    - Crash logs and coredump info
+    - pvestatd journal logs
+
+  pvestatd found (PID: 12345)
+
+  This capture will take 10 minutes.
+
+  Type CAPTURE to start or any other input to cancel
+Confirmation: CAPTURE
+
+Starting strace capture (10 minutes)...
+Collecting diagnostics: ✓ Complete
+Monitoring pvestatd for 10 minutes...
+
+  Capturing: 120/600 seconds (pvestatd running)
+
+Collecting final state: ✓ Complete
+Compressing bundle: ✓ Complete
+
+Diagnostics bundle created successfully
+
+  Output file: /tmp/truenas-diag-20231215-143022.tar.gz
+  File size:   512K
+
+  Please send this file for analysis.
+```
+
+### Requirements
+
+**System Requirements**:
+- Root access on Proxmox node
+- pvestatd service running
+- `strace` command available (usually pre-installed)
+- Sufficient disk space in `/tmp/` (typically 300KB-1MB for tarball)
+
+**Storage Requirements**: None (bundle is system-wide, not storage-specific)
+
+### Troubleshooting
+
+**"pvestatd is not running"**:
+```bash
+systemctl start pvestatd
+```
+
+**"strace: attach: ptrace(PTRACE_SEIZE, 12345): Operation not permitted"**:
+- Ensure running as root: `sudo bash install.sh`
+- Check SELinux restrictions: `getenforce`
+
+**Bundle file not created**:
+- Check `/tmp/` disk space: `df -h /tmp`
+- Check file permissions on `/tmp/`
+- Verify strace ran successfully (check console output)
+
+### See Also
+
+- [Health Check Tool](#health-check-tool) - For configuration and connectivity validation
+- [Integrated Plugin Test](#integrated-plugin-test) - For function testing
+- [FIO Storage Benchmark](#fio-storage-benchmark) - For performance testing
+
+---
+
 ## FIO Storage Benchmark
 
 ### Overview
@@ -801,7 +939,7 @@ The benchmark suite performs 6 categories of tests, each at 5 different queue de
 ```bash
 bash install.sh
 # Select: "Diagnostics" from the main menu
-# Select: "Run FIO storage benchmark" from the diagnostics menu
+# Select: "Run FIO storage benchmark" (option 5) from the diagnostics menu
 # Read the benchmark description and warnings
 # Type "ACCEPT" (in caps) to confirm and proceed
 # Select storage to benchmark from the list
@@ -820,6 +958,15 @@ bash install.sh
 8. **Benchmark Execution** - Runs 30 tests with progress indicators (25-30 minutes)
 9. **Results Summary** - Displays performance metrics for all tests
 10. **Automatic Cleanup** - Removes test volume and cleans up resources
+
+#### Extended Mode (5+)
+
+For more comprehensive testing, the benchmark supports an extended mode that adds additional queue depths and test variations. To activate extended mode:
+
+1. At the diagnostics menu prompt, type `5+` instead of `5`
+2. The benchmark will run with extended test parameters
+
+**Note**: Extended mode significantly increases benchmark duration. Use this option when you need deeper performance analysis or are investigating specific I/O patterns.
 
 ### Requirements
 
@@ -1781,6 +1928,8 @@ Orphaned resources occur when storage operations fail partway through:
 1. **Orphaned Extents** - iSCSI extents pointing to deleted/missing zvols
 2. **Orphaned Target-Extent Mappings** - Mappings referencing deleted extents
 3. **Orphaned Zvols** - Zvols without corresponding iSCSI extents
+
+> **Note**: Orphan detection currently supports **iSCSI transport only**. It does not yet detect orphaned NVMe/TCP namespaces or subsystems. Zvols created for NVMe/TCP will not be scanned or cleaned up by this tool.
 
 **Common Causes**:
 - VM deletion failures
