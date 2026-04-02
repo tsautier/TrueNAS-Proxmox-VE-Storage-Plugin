@@ -1,3 +1,11 @@
+<h1 align="center"><b>⚠️ THE TRUENAS PLUGIN HAS A NEW HOME ⚠️</b></h1>
+<p align="center">The plugin has officially been adopted by TrueNAS!</p>
+<p align="center">Going forward all updates will be found at the new official repo:</p>
+<p align="center">👉 https://github.com/truenas/truenas-proxmox-plugin</p>
+<p align="center">This repo will be archived for historial purposes</p>
+
+
+---
 <h1 align="center">TrueNAS Proxmox VE Storage Plugin</h1>
 
 <p align="center">A high-performance storage plugin for Proxmox VE that integrates TrueNAS SCALE via iSCSI or NVMe/TCP, featuring live snapshots, ZFS integration, and cluster compatibility.</p>
